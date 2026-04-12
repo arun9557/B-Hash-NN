@@ -195,6 +195,10 @@ class BNNGateway:
             timeout=SCAN_DURATION_SEC
         )
         for device in discovered:
+            # Temporary open scan: print every visible BLE device for debugging.
+            print(device.name, device.address)
+
+            # Keep gateway connection logic focused on B#NN peripherals only.
             if not _is_bnn_device(device):
                 continue
 

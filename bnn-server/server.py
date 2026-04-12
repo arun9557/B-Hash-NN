@@ -25,6 +25,24 @@ log = logging.getLogger("B#NN-API")
 
 app = Flask(__name__)
 
+
+@app.route("/", methods=["GET"])
+def index():
+    """API landing page for browser visits to /."""
+    return jsonify({
+        "service": "B#NN Flask API",
+        "status": "running",
+        "endpoints": {
+            "health": {"method": "GET", "path": "/health"},
+            "model": {"method": "GET", "path": "/model"},
+            "chat": {
+                "method": "POST",
+                "path": "/chat",
+                "json": {"prompt": "Hello", "device_id": "phone_1"},
+            },
+        },
+    })
+
 # ── health check ─────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():

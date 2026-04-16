@@ -7,6 +7,7 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -65,6 +66,7 @@ class BLEManager(
     private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var connectedDevice: BluetoothDevice? = null
+    private val notificationEnabledDevices = mutableSetOf<String>()
 
     // ── TX characteristic — we notify the central through this ───
     private var txCharacteristic: BluetoothGattCharacteristic? = null
@@ -239,6 +241,7 @@ class BLEManager(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     connectedDevice = device
+                    notificationEnabledDevices.remove(device.address)
                     val name = device.name ?: device.address
                     Log.i(TAG, "Connected: $name")
                     mainHandler.post {
@@ -248,6 +251,7 @@ class BLEManager(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.i(TAG, "Disconnected: ${device.address}")
+                    notificationEnabledDevices.remove(device.address)
                     connectedDevice = null
                     mainHandler.post {
                         stopHeartbeat()
@@ -296,13 +300,28 @@ class BLEManager(
             offset: Int,
             value: ByteArray
         ) {
+            if (descriptor.uuid == CCCD_UUID && descriptor.characteristic?.uuid == BNN_TX_CHAR_UUID) {
+                descriptor.value = value
+                val notificationsEnabled =
+                    value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
+                            value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
+
+                if (notificationsEnabled) {
+                    notificationEnabledDevices.add(device.address)
+                    Log.i(TAG, "Notifications enabled for ${device.address}")
+                } else {
+                    notificationEnabledDevices.remove(device.address)
+                    Log.i(TAG, "Notifications disabled for ${device.address}")
+                }
+            }
+
             if (responseNeeded) {
                 gattServer?.sendResponse(
                     device, requestId,
                     BluetoothGatt.GATT_SUCCESS, 0, null
                 )
             }
-            Log.d(TAG, "Descriptor write from ${device.address} — notifications enabled.")
+            Log.d(TAG, "Descriptor write from ${device.address}")
         }
     }
 
@@ -412,9 +431,25 @@ class BLEManager(
         txChar: BluetoothGattCharacteristic,
         raw: ByteArray
     ) {
-        txChar.value = raw
-        val success = gattServer?.notifyCharacteristicChanged(device, txChar, false)
-        Log.d(TAG, "Notification sent: ${raw.size} bytes, success=$success")
+        if (!notificationEnabledDevices.contains(device.address)) {
+            Log.w(TAG, "Notification skipped: CCCD not enabled for ${device.address}")
+            return
+        }
+
+        val status = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gattServer?.notifyCharacteristicChanged(device, txChar, false, raw)
+                ?: BluetoothGatt.GATT_FAILURE
+        } else {
+            txChar.value = raw
+            val ok = gattServer?.notifyCharacteristicChanged(device, txChar, false) == true
+            if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+        }
+
+        if (status == BluetoothGatt.GATT_SUCCESS) {
+            Log.d(TAG, "Notification sent: ${raw.size} bytes")
+        } else {
+            Log.w(TAG, "Notification failed (status=$status, bytes=${raw.size})")
+        }
     }
 
     private fun sendChunked(

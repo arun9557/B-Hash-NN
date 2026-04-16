@@ -20,11 +20,7 @@ import java.util.UUID
 // ══════════════════════════════════════════════════════════════════
 
 val BNN_SERVICE_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef0")
-
-// RX = phone READS (laptop writes to this)
 val BNN_RX_CHAR_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef1")
-
-// TX = phone WRITES (laptop subscribes to notifications on this)
 val BNN_TX_CHAR_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcdef2")
 
 // Standard CCCD UUID — needed to enable BLE notifications on the TX characteristic
@@ -33,7 +29,6 @@ val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 private const val TAG = "B#NN-BLE"
 private const val DEVICE_NAME = "B#NN_DEVICE"
 private const val HEARTBEAT_INTERVAL_MS = 10_000L   // send ping every 10 seconds
-private const val ADVERTISE_START_DELAY_MS = 1_500L
 
 // ══════════════════════════════════════════════════════════════════
 //  CALLBACK INTERFACE  — BLEManager talks back to MainActivity
@@ -65,6 +60,7 @@ class BLEManager(
     private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var connectedDevice: BluetoothDevice? = null
+    private var isAdvertising = false
 
     // ── TX characteristic — we notify the central through this ───
     private var txCharacteristic: BluetoothGattCharacteristic? = null
@@ -90,9 +86,14 @@ class BLEManager(
             return
         }
 
+        // 1-4. Setup GATT Server and Service first
         setupGattServer()
-        callback.onStatusChanged("Preparing GATT service…")
-        Log.i(TAG, "B#NN BLE Peripheral starting (waiting for service add callback).")
+        
+        // 5. THEN start advertising
+        startAdvertising()
+        
+        callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
+        Log.i(TAG, "B#NN BLE Peripheral started.")
     }
 
     fun stop() {
@@ -109,14 +110,16 @@ class BLEManager(
     // ──────────────────────────────────────────────────────────────
 
     private fun setupGattServer() {
+        // 1. Create GATT server
         gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
 
-        // Build the GATT service with two characteristics
+        // 2. Create service
         val service = BluetoothGattService(
             BNN_SERVICE_UUID,
             BluetoothGattService.SERVICE_TYPE_PRIMARY
         )
 
+        // 3. Add characteristics
         // RX Characteristic — Central writes to this (we receive messages)
         val rxChar = BluetoothGattCharacteristic(
             BNN_RX_CHAR_UUID,
@@ -143,14 +146,12 @@ class BLEManager(
 
         service.addCharacteristic(rxChar)
         service.addCharacteristic(txChar)
-        val submitted = gattServer?.addService(service) == true
 
-        if (submitted) {
-            Log.i(TAG, "GATT service add requested. Waiting for onServiceAdded callback.")
-        } else {
-            callback.onError("Failed to add GATT service.")
-            Log.e(TAG, "addService returned false.")
-        }
+        // 4. Add service to server
+        gattServer?.addService(service)
+
+        Log.d("BLE", "Service added successfully")
+        Log.i(TAG, "GATT server set up with B#NN service.")
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -158,6 +159,8 @@ class BLEManager(
     // ──────────────────────────────────────────────────────────────
 
     private fun startAdvertising() {
+        if (isAdvertising) return
+
         advertiser = bluetoothAdapter.bluetoothLeAdvertiser
         if (advertiser == null) {
             callback.onError("BLE advertising not supported on this device.")
@@ -175,17 +178,22 @@ class BLEManager(
             .build()
 
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
-            .setIncludeTxPowerLevel(false)
-            .addServiceUuid(ParcelUuid(BNN_SERVICE_UUID))  // so Central can filter by service
+            .addServiceUuid(ParcelUuid(BNN_SERVICE_UUID))  // Only UUID in main advertisement
             .build()
 
-        advertiser?.startAdvertising(settings, data, advertiseCallback)
-        Log.i(TAG, "BLE advertising started.")
+        val scanResponse = AdvertiseData.Builder()
+            .setIncludeDeviceName(true)                    // Device name in scan response
+            .build()
+
+        advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
+        isAdvertising = true
+        Log.i(TAG, "BLE advertising started (UUID in AdvertiseData, Name in ScanResponse).")
     }
 
     private fun stopAdvertising() {
+        if (!isAdvertising) return
         advertiser?.stopAdvertising(advertiseCallback)
+        isAdvertising = false
         advertiser = null
     }
 
@@ -194,6 +202,7 @@ class BLEManager(
             Log.i(TAG, "Advertising started successfully.")
         }
         override fun onStartFailure(errorCode: Int) {
+            isAdvertising = false
             val reason = when (errorCode) {
                 ADVERTISE_FAILED_DATA_TOO_LARGE       -> "Data too large"
                 ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
@@ -213,23 +222,6 @@ class BLEManager(
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
 
-        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
-            Log.d(TAG, "Service added: $status uuid=${service.uuid}")
-
-            if (service.uuid != BNN_SERVICE_UUID) return
-
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                mainHandler.postDelayed({
-                    startAdvertising()
-                    callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
-                }, ADVERTISE_START_DELAY_MS)
-            } else {
-                mainHandler.post {
-                    callback.onError("GATT service add failed: $status")
-                }
-            }
-        }
-
         // Device connected or disconnected
         override fun onConnectionStateChange(
             device: BluetoothDevice,
@@ -242,6 +234,7 @@ class BLEManager(
                     val name = device.name ?: device.address
                     Log.i(TAG, "Connected: $name")
                     mainHandler.post {
+                        stopAdvertising()
                         callback.onConnected(name)
                         startHeartbeat()
                     }
@@ -252,9 +245,11 @@ class BLEManager(
                     mainHandler.post {
                         stopHeartbeat()
                         callback.onDisconnected()
-                        // Resume advertising so the Central can reconnect
-                        startAdvertising()
-                        callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
+                        // Resume advertising with a 2-second delay for stability
+                        mainHandler.postDelayed({
+                            startAdvertising()
+                            callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
+                        }, 2000)
                     }
                 }
             }

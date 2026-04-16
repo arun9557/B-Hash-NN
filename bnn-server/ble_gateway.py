@@ -44,16 +44,17 @@ from bleak.exc import BleakError
 BNN_SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
 BNN_RX_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef1"  # laptop WRITES → phone reads
 BNN_TX_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef2"  # phone WRITES  → laptop notified
+TEST_HELLO_PAYLOAD = "Hello"  # keep initial probe small
 
 # Flask / Ollama
 FLASK_API_URL = "http://localhost:5000/chat"
 
 # Scanning
-SCAN_INTERVAL_SEC = 8    # how often to re-scan
+SCAN_INTERVAL_SEC = 5    # temporary: less aggressive retry cadence
 SCAN_DURATION_SEC = 5    # how long each scan lasts
 
 # Connection / reconnect
-CONNECT_TIMEOUT_SEC  = 10   # give up connecting after this many seconds
+CONNECT_TIMEOUT_SEC  = 15   # temporary: slower timeout for stable connects
 MAX_RECONNECT_TRIES  = 10   # declare DEAD after this many failed attempts
 RECONNECT_BASE_SEC   = 2    # first retry delay (doubles each time)
 RECONNECT_MAX_SEC    = 60   # cap for exponential backoff
@@ -159,6 +160,7 @@ class BNNGateway:
         self._sessions: Dict[str, DeviceSession] = {}
         self._seen_ids: List[str] = []   # message IDs we've already processed
         self._lock = asyncio.Lock()      # protects _sessions across concurrent tasks
+        self._connect_lock = asyncio.Lock()  # ensures one connection attempt at a time
 
     # ──────────────────────────────────────────────────────────────
     #  ENTRY POINT
@@ -289,7 +291,8 @@ class BNNGateway:
             session.state = DeviceState.CONNECTING
             session.reconnect_count = attempt
 
-            connected_ok = await self._connect_once(session)
+            async with self._connect_lock:
+                connected_ok = await self._connect_once(session)
 
             if connected_ok:
                 # Device was working but then disconnected — reset counter and retry
@@ -348,13 +351,24 @@ class BNNGateway:
 
             log.info(f"[{name}] Connected. Subscribing to TX notifications…")
 
-            # Subscribe: fires _on_notify whenever phone writes to TX_CHAR
-            await client.start_notify(
-                BNN_TX_CHAR_UUID,
-                lambda char, data: self._on_notify(session, char, data),
-            )
+            # Subscribe before any write so incoming replies are captured.
+            def notify_callback(char: BleakGATTCharacteristic, data: bytearray):
+                self._on_notify(session, char, data)
+
+            await client.start_notify(BNN_TX_CHAR_UUID, notify_callback)
 
             log.info(f"[{name}] Ready. Waiting for messages.")
+
+            # Initial smoke-test packet in strict JSON format.
+            hello_msg = json.dumps(
+                {
+                    "type": "request",
+                    "id": "1",
+                    "payload": TEST_HELLO_PAYLOAD,
+                }
+            ).encode("utf-8")
+            await client.write_gatt_char(BNN_RX_CHAR_UUID, hello_msg, response=False)
+            log.info(f"[{name}] Sent test request payload: {TEST_HELLO_PAYLOAD}")
 
             # Block here until disconnect callback fires
             await link_dropped.wait()
@@ -623,8 +637,18 @@ class BNNGateway:
 # ══════════════════════════════════════════════════════════════════
 
 def _is_bnn_device(device: BLEDevice) -> bool:
-    """True if this peripheral advertises a B#NN name."""
-    return "BNN" in (device.name or "").upper()
+    """True if this peripheral name/advertisement indicates a B#NN device."""
+    name = (device.name or "").upper()
+
+    # Normalize labels like "B#NN_DEVICE" -> "BNNDEVICE".
+    normalized = "".join(ch for ch in name if ch.isalnum())
+    if "BNN" in normalized:
+        return True
+
+    # Fallback: some stacks expose UUIDs in advertisement metadata only.
+    metadata = getattr(device, "metadata", {}) or {}
+    uuids = metadata.get("uuids") or []
+    return any(str(u).lower() == BNN_SERVICE_UUID.lower() for u in uuids)
 
 
 def _make_msg(

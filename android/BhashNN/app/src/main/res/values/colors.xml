@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- ── Dark theme backgrounds ── -->
+    <color name="bg_primary">#0F1117</color>      <!-- main screen background -->
+    <color name="bg_surface">#1A1D27</color>       <!-- top bar, input bar -->
+    <color name="bg_input">#252836</color>         <!-- input field -->
+
+    <!-- ── Text ── -->
+    <color name="text_primary">#F0F0F0</color>
+    <color name="text_secondary">#9094A8</color>
+    <color name="text_hint">#555870</color>
+
+    <!-- ── Accent (B#NN purple-blue) ── -->
+    <color name="accent">#6C63FF</color>
+    <color name="accent_dark">#5A53D6</color>
+
+    <!-- ── Chat bubbles ── -->
+    <color name="bubble_outgoing_bg">#6C63FF</color>    <!-- user messages — purple -->
+    <color name="bubble_outgoing_text">#FFFFFF</color>
+    <color name="bubble_incoming_bg">#252836</color>    <!-- AI messages — surface -->
+    <color name="bubble_incoming_text">#E8E8E8</color>
+
+    <!-- ── Status dots ── -->
+    <color name="dot_connected">#4CAF50</color>
+    <color name="dot_disconnected">#FF5252</color>
+
+    <!-- Required by Material / AppCompat -->
+    <color name="colorPrimary">#6C63FF</color>
+    <color name="colorPrimaryDark">#3D35B5</color>
+    <color name="colorAccent">#6C63FF</color>
+</resources>

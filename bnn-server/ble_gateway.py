@@ -24,6 +24,7 @@ What's new in v2.0 vs v1:
 import asyncio
 import json
 import logging
+import sys
 import time
 import uuid
 from enum import Enum, auto
@@ -61,7 +62,7 @@ RECONNECT_MAX_SEC    = 60   # cap for exponential backoff
 
 # Heartbeat
 HEARTBEAT_INTERVAL_SEC = 10  # send ping every N seconds
-HEARTBEAT_TIMEOUT_SEC  = 30  # declare device gone if no pong within N seconds
+HEARTBEAT_TIMEOUT_SEC  = 90  # allow transient BLE jitter before forcing disconnect
 
 # BLE transfer limits
 BLE_CHUNK_SIZE    = 384    # max bytes per BLE write (leave room for chunk envelope)
@@ -114,6 +115,8 @@ class DeviceSession:
         self.client:          Optional[BleakClient] = None
         self.reconnect_count: int   = 0
         self.last_pong_ts:    float = time.time()  # seed so watchdog doesn't fire immediately
+        self.last_activity_ts: float = time.time()  # any inbound packet updates this
+        self.link_dropped_event: Optional[asyncio.Event] = None
 
         # Chunk reassembly: chunk_id -> {index: bytes_piece}
         self._chunk_buf:  Dict[str, Dict[int, bytes]] = {}
@@ -128,9 +131,14 @@ class DeviceSession:
         """Call this every time we receive a pong (or any sign of life)."""
         self.last_pong_ts = time.time()
 
+    def record_activity(self):
+        """Call this on any inbound packet to avoid false watchdog disconnects."""
+        self.last_activity_ts = time.time()
+
     def pong_overdue(self) -> bool:
         """True if we haven't heard a pong in HEARTBEAT_TIMEOUT_SEC seconds."""
-        return (time.time() - self.last_pong_ts) > HEARTBEAT_TIMEOUT_SEC
+        last_seen = max(self.last_pong_ts, self.last_activity_ts)
+        return (time.time() - last_seen) > HEARTBEAT_TIMEOUT_SEC
 
     def __repr__(self):
         return f"<Device {self.name} [{self.mac[:8]}…] {self.state.name}>"
@@ -161,6 +169,7 @@ class BNNGateway:
         self._seen_ids: List[str] = []   # message IDs we've already processed
         self._lock = asyncio.Lock()      # protects _sessions across concurrent tasks
         self._connect_lock = asyncio.Lock()  # ensures one connection attempt at a time
+        self._connection_tasks: Dict[str, asyncio.Task] = {}  # one manager task per MAC
 
     # ──────────────────────────────────────────────────────────────
     #  ENTRY POINT
@@ -187,6 +196,18 @@ class BNNGateway:
         """Continuously scan for B#NN peripherals."""
         while True:
             try:
+                async with self._lock:
+                    busy = any(
+                        s.state in (DeviceState.CONNECTING, DeviceState.CONNECTED)
+                        for s in self._sessions.values()
+                    )
+
+                # Many Windows BLE adapters become unstable when scanning while
+                # an active GATT link is up. Pause scan to avoid disconnect flapping.
+                if busy:
+                    await asyncio.sleep(SCAN_INTERVAL_SEC)
+                    continue
+
                 await self._do_scan()
             except Exception as e:
                 log.error(f"Scan failed: {e}")
@@ -197,9 +218,6 @@ class BNNGateway:
             timeout=SCAN_DURATION_SEC
         )
         for device in discovered:
-            # Temporary open scan: print every visible BLE device for debugging.
-            print(device.name, device.address)
-
             # Keep gateway connection logic focused on B#NN peripherals only.
             if not _is_bnn_device(device):
                 continue
@@ -207,16 +225,16 @@ class BNNGateway:
             async with self._lock:
                 session = self._sessions.get(device.address)
 
-            # Only spawn a connection task if we're not already managing this device
-            already_managed = (
-                session is not None
-                and session.state not in (DeviceState.DEAD, DeviceState.DISCONNECTED)
-            )
-            if not already_managed:
+            # Ensure exactly one long-lived connection manager task per device.
+            task = self._connection_tasks.get(device.address)
+            task_running = task is not None and not task.done()
+
+            if not task_running:
                 log.info(f"Found: {device.name} [{device.address}]")
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self._connect_with_retry(device.address, device.name or device.address)
                 )
+                self._connection_tasks[device.address] = task
 
     # ──────────────────────────────────────────────────────────────
     #  TASK 2: HEARTBEAT LOOP
@@ -276,9 +294,13 @@ class BNNGateway:
         Gives up after MAX_RECONNECT_TRIES failures in a row.
         A successful connection resets the attempt counter.
         """
-        session = DeviceSession(mac, name)
         async with self._lock:
-            self._sessions[mac] = session
+            session = self._sessions.get(mac)
+            if session is None:
+                session = DeviceSession(mac, name)
+                self._sessions[mac] = session
+            else:
+                session.name = name or session.name
 
         attempt = 0
         while attempt < MAX_RECONNECT_TRIES:
@@ -303,6 +325,8 @@ class BNNGateway:
 
         log.error(f"[{name}] Gave up after {MAX_RECONNECT_TRIES} failed attempts.")
         session.state = DeviceState.DEAD
+        async with self._lock:
+            self._connection_tasks.pop(mac, None)
 
     async def _connect_once(self, session: DeviceSession) -> bool:
         """
@@ -319,6 +343,7 @@ class BNNGateway:
 
         # This event is set when the BLE link drops — unblocks this coroutine
         link_dropped = asyncio.Event()
+        session.link_dropped_event = link_dropped
 
         def on_disconnect(client: BleakClient):
             """Called by bleak when the BLE connection drops."""
@@ -328,11 +353,15 @@ class BNNGateway:
             link_dropped.set()
 
         try:
-            client = BleakClient(
-                mac,
-                disconnected_callback=on_disconnect,
-                timeout=CONNECT_TIMEOUT_SEC,
-            )
+            client_kwargs = {
+                "disconnected_callback": on_disconnect,
+                "timeout": CONNECT_TIMEOUT_SEC,
+            }
+            if sys.platform.startswith("win"):
+                # On Windows, force fresh service discovery after service-change events.
+                client_kwargs["winrt"] = {"use_cached_services": False}
+
+            client = BleakClient(mac, **client_kwargs)
 
             log.info(f"[{name}] Connecting…")
             await client.connect()
@@ -367,7 +396,7 @@ class BNNGateway:
                     "payload": TEST_HELLO_PAYLOAD,
                 }
             ).encode("utf-8")
-            await client.write_gatt_char(BNN_RX_CHAR_UUID, hello_msg, response=False)
+            await self._ble_write(session, hello_msg)
             log.info(f"[{name}] Sent test request payload: {TEST_HELLO_PAYLOAD}")
 
             # Block here until disconnect callback fires
@@ -385,6 +414,29 @@ class BNNGateway:
         except Exception as e:
             log.error(f"[{name}] Unexpected connect error: {e}")
             return False
+
+        finally:
+            session.link_dropped_event = None
+
+    async def _mark_link_dead(self, session: DeviceSession, reason: str):
+        """Force this session into disconnected state and unblock reconnect loop."""
+        if session.state == DeviceState.DISCONNECTED:
+            return
+
+        log.warning(f"[{session.name}] Forcing reconnect: {reason}")
+        session.state = DeviceState.DISCONNECTED
+
+        client = session.client
+        session.client = None
+
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+        if session.link_dropped_event is not None and not session.link_dropped_event.is_set():
+            session.link_dropped_event.set()
 
     # ──────────────────────────────────────────────────────────────
     #  RECEIVE  (notification callback)
@@ -423,6 +475,9 @@ class BNNGateway:
         msg_id   = msg.get("id", "")
         msg_type = msg.get("type", "unknown")
         payload  = msg.get("payload", "")
+
+        # Any inbound packet counts as liveness signal.
+        session.record_activity()
 
         # ── Deduplication (prevents mesh relay loops) ─────────────
         if msg_id and msg_id in self._seen_ids:
@@ -549,12 +604,14 @@ class BNNGateway:
             await session.client.write_gatt_char(
                 BNN_RX_CHAR_UUID,
                 raw,
-                response=False,  # write-without-response is faster for bulk data
+                response=True,  # more stable on Windows adapters than fire-and-forget writes
             )
         except BleakError as e:
             log.error(f"[{session.name}] BLE write error: {e}")
+            await self._mark_link_dead(session, f"BLE write error: {e}")
         except Exception as e:
             log.error(f"[{session.name}] Write failed: {e}")
+            await self._mark_link_dead(session, f"Write failed: {e}")
 
     # ──────────────────────────────────────────────────────────────
     #  BROADCAST  — send to all connected devices

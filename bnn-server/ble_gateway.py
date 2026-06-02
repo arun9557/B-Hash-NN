@@ -22,13 +22,15 @@ What's new in v2.0 vs v1:
 """
 
 import asyncio
+import base64
 import json
 import logging
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from enum import Enum, auto
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import requests
 from bleak import BleakClient, BleakScanner
@@ -166,10 +168,10 @@ class BNNGateway:
 
     def __init__(self):
         self._sessions: Dict[str, DeviceSession] = {}
-        self._seen_ids: List[str] = []   # message IDs we've already processed
+        self._seen_ids: OrderedDict = OrderedDict()  # O(1) dedup with bounded size
         self._lock = asyncio.Lock()      # protects _sessions across concurrent tasks
-        self._connect_lock = asyncio.Lock()  # ensures one connection attempt at a time
         self._connection_tasks: Dict[str, asyncio.Task] = {}  # one manager task per MAC
+        self._loop: Optional[asyncio.AbstractEventLoop] = None  # stored at startup
 
     # ──────────────────────────────────────────────────────────────
     #  ENTRY POINT
@@ -181,6 +183,8 @@ class BNNGateway:
         log.info("  B#NN Gateway v2.0  —  Starting up")
         log.info("  Scanning for B#NN BLE peripherals…")
         log.info("===========================================")
+
+        self._loop = asyncio.get_running_loop()
 
         await asyncio.gather(
             self._scan_loop(),
@@ -196,25 +200,13 @@ class BNNGateway:
         """Continuously scan for B#NN peripherals."""
         while True:
             try:
-                async with self._lock:
-                    busy = any(
-                        s.state in (DeviceState.CONNECTING, DeviceState.CONNECTED)
-                        for s in self._sessions.values()
-                    )
-
-                # Many Windows BLE adapters become unstable when scanning while
-                # an active GATT link is up. Pause scan to avoid disconnect flapping.
-                if busy:
-                    await asyncio.sleep(SCAN_INTERVAL_SEC)
-                    continue
-
                 await self._do_scan()
             except Exception as e:
                 log.error(f"Scan failed: {e}")
             await asyncio.sleep(SCAN_INTERVAL_SEC)
 
     async def _do_scan(self):
-        discovered: List[BLEDevice] = await BleakScanner.discover(
+        discovered = await BleakScanner.discover(
             timeout=SCAN_DURATION_SEC
         )
         for device in discovered:
@@ -313,8 +305,7 @@ class BNNGateway:
             session.state = DeviceState.CONNECTING
             session.reconnect_count = attempt
 
-            async with self._connect_lock:
-                connected_ok = await self._connect_once(session)
+            connected_ok = await self._connect_once(session)
 
             if connected_ok:
                 # Device was working but then disconnected — reset counter and retry
@@ -451,8 +442,15 @@ class BNNGateway:
         """
         Called by bleak's internal thread when the peripheral sends a notification.
         Hand off to the asyncio event loop immediately — don't do work here.
+
+        IMPORTANT: This runs on Bleak's background thread, so we MUST use
+        call_soon_threadsafe to schedule work on the event loop.
+        asyncio.create_task() is NOT thread-safe.
         """
-        asyncio.create_task(self._handle_raw(session, bytes(raw)))
+        self._loop.call_soon_threadsafe(
+            self._loop.create_task,
+            self._handle_raw(session, bytes(raw)),
+        )
 
     async def _handle_raw(self, session: DeviceSession, raw: bytes):
         """Decode raw bytes → JSON. Handle chunked messages."""
@@ -484,10 +482,9 @@ class BNNGateway:
             log.debug(f"Duplicate msg {msg_id[:8]} — dropped.")
             return
         if msg_id:
-            self._seen_ids.append(msg_id)
-            if len(self._seen_ids) > DEDUP_LIMIT:
-                # Trim oldest half when we hit the limit
-                self._seen_ids = self._seen_ids[-(DEDUP_LIMIT // 2):]
+            self._seen_ids[msg_id] = True
+            while len(self._seen_ids) > DEDUP_LIMIT:
+                self._seen_ids.popitem(last=False)
 
         log.info(f"[{session.name}] <- {msg_type.upper():<10} | {payload[:60]}")
 
@@ -525,7 +522,8 @@ class BNNGateway:
         """
         Receive a prompt from a BLE device.
         Send it to the Flask API (which talks to Ollama).
-        Return the AI response to the same device.
+        Return the AI response to the same device, and broadcast to the mesh
+        if the original message had TTL > 0.
         """
         prompt = msg.get("payload", "").strip()
         if not prompt:
@@ -536,7 +534,7 @@ class BNNGateway:
 
         try:
             # _call_api is a blocking HTTP call — run in thread pool
-            loop     = asyncio.get_event_loop()
+            loop     = asyncio.get_running_loop()
             ai_reply = await loop.run_in_executor(
                 None, _call_api, prompt, session.mac
             )
@@ -558,8 +556,21 @@ class BNNGateway:
             ai_reply = f"Unexpected error: {e}"
             log.error(f"[{session.name}] Unexpected: {e}")
 
+        # Send response back to the requesting device
         response = _make_msg("response", ai_reply, dst=session.mac)
         await self._send(session, response)
+
+        # Mesh relay: broadcast the AI response to all other connected devices
+        # if the original message had TTL > 0
+        original_ttl = msg.get("ttl", 0)
+        if original_ttl > 0:
+            relay_msg = _make_msg(
+                "relay", ai_reply,
+                dst="broadcast",
+                ttl=original_ttl - 1,
+                hops=msg.get("hops", 0) + 1,
+            )
+            await self._broadcast(relay_msg, exclude_mac=session.mac)
 
     # ──────────────────────────────────────────────────────────────
     #  SEND  — write to one device (with chunking)
@@ -571,6 +582,9 @@ class BNNGateway:
 
         Long messages (longer than BLE_CHUNK_SIZE) are automatically split
         into numbered chunks. The device reassembles them in order.
+
+        Chunk data is base64-encoded to prevent UTF-8 mid-character corruption
+        when splitting raw JSON bytes at arbitrary boundaries.
         """
         if not session.is_alive() or session.client is None:
             log.warning(f"[{session.name}] Send skipped — device not connected.")
@@ -593,7 +607,7 @@ class BNNGateway:
                     "chunk_id":    chunk_id,
                     "chunk_idx":   idx,
                     "chunk_total": total,
-                    "data":        piece.decode("utf-8", errors="replace"),
+                    "data":        base64.b64encode(piece).decode("ascii"),
                 }
                 await self._ble_write(session, json.dumps(envelope).encode("utf-8"))
                 await asyncio.sleep(0.04)  # small pause so peripheral can keep up
@@ -643,6 +657,8 @@ class BNNGateway:
         Returns None while still waiting.
 
         Stale incomplete messages (timed out) are automatically discarded.
+
+        Chunk data is base64-decoded to recover the original raw bytes safely.
         """
         chunk_id    = packet.get("chunk_id")
         chunk_idx   = packet.get("chunk_idx", 0)
@@ -657,7 +673,7 @@ class BNNGateway:
             session._chunk_buf[chunk_id]  = {}
             session._chunk_meta[chunk_id] = {"total": chunk_total, "ts": time.time()}
 
-        session._chunk_buf[chunk_id][chunk_idx] = data_str.encode("utf-8")
+        session._chunk_buf[chunk_id][chunk_idx] = base64.b64decode(data_str)
 
         # Check if all chunks have arrived
         if len(session._chunk_buf[chunk_id]) >= chunk_total:

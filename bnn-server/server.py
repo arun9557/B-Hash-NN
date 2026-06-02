@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import requests
 
 # ── config ──────────────────────────────────────────────────────────────────
@@ -24,6 +25,7 @@ logging.basicConfig(
 log = logging.getLogger("B#NN-API")
 
 app = Flask(__name__)
+CORS(app)
 
 
 @app.route("/", methods=["GET"])
@@ -35,6 +37,7 @@ def index():
         "endpoints": {
             "health": {"method": "GET", "path": "/health"},
             "model": {"method": "GET", "path": "/model"},
+            "status": {"method": "GET", "path": "/status"},
             "chat": {
                 "method": "POST",
                 "path": "/chat",
@@ -48,6 +51,13 @@ def index():
 def health():
     """Quick check – is the server alive?"""
     return jsonify({"status": "ok", "model": MODEL_NAME, "server": "B#NN"})
+
+
+# ── status endpoint ──────────────────────────────────────────────────────────
+@app.route("/status", methods=["GET"])
+def status():
+    """Placeholder status — the BLE gateway updates connected_devices at runtime."""
+    return jsonify({"connected_devices": 0, "server": "B#NN"})
 
 
 # ── main chat endpoint ────────────────────────────────────────────────────────

@@ -30,6 +30,8 @@ class MainActivity : AppCompatActivity(), BLECallback {
     private lateinit var statusDot:     View
     private lateinit var btnToggleBle:  Button
     private lateinit var progressBar:   ProgressBar
+    private lateinit var switchRelay:   Switch
+    private lateinit var tvRelayCount:  TextView
 
     // ── Chat adapter ───────────────────────────────────────────────
     private lateinit var chatAdapter: ChatAdapter
@@ -113,6 +115,8 @@ class MainActivity : AppCompatActivity(), BLECallback {
         statusDot     = findViewById(R.id.statusDot)
         btnToggleBle  = findViewById(R.id.btnToggleBle)
         progressBar   = findViewById(R.id.progressBar)
+        switchRelay   = findViewById(R.id.switchRelay)
+        tvRelayCount  = findViewById(R.id.tvRelayCount)
     }
 
     private fun setupRecyclerView() {
@@ -123,6 +127,7 @@ class MainActivity : AppCompatActivity(), BLECallback {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun setupInputListeners() {
         // Send button click
         btnSend.setOnClickListener { sendUserMessage() }
@@ -138,6 +143,17 @@ class MainActivity : AppCompatActivity(), BLECallback {
         // Toggle BLE on/off
         btnToggleBle.setOnClickListener {
             if (bleRunning) stopBle() else checkPermissionsAndStart()
+        }
+
+        // Relay mode toggle
+        switchRelay.setOnCheckedChangeListener { _, isChecked ->
+            if (bleRunning) {
+                bleManager.setRelayMode(isChecked)
+                tvRelayCount.text = if (isChecked) "0 peers" else ""
+            } else {
+                switchRelay.isChecked = false
+                showToast("Start BLE first to enable relay mode.")
+            }
         }
     }
 
@@ -161,8 +177,8 @@ class MainActivity : AppCompatActivity(), BLECallback {
         bleManager.sendPrompt(text)
     }
 
-    private fun addMessage(text: String, isOutgoing: Boolean) {
-        chatAdapter.addMessage(ChatMessage(text, isOutgoing))
+    private fun addMessage(text: String, isOutgoing: Boolean, isRelay: Boolean = false) {
+        chatAdapter.addMessage(ChatMessage(text, isOutgoing, isRelay = isRelay))
         scrollToBottom()
     }
 
@@ -217,6 +233,22 @@ class MainActivity : AppCompatActivity(), BLECallback {
         }
     }
 
+    override fun onRelayPeerConnected(name: String) {
+        runOnUiThread {
+            val count = bleManager.relayPeerCount
+            tvRelayCount.text = "$count peer${if (count != 1) "s" else ""}"
+            showToast("Relay peer connected: $name")
+        }
+    }
+
+    override fun onRelayPeerDisconnected(name: String) {
+        runOnUiThread {
+            val count = bleManager.relayPeerCount
+            tvRelayCount.text = "$count peer${if (count != 1) "s" else ""}"
+            showToast("Relay peer disconnected: $name")
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  BLE START / STOP
     // ══════════════════════════════════════════════════════════════
@@ -255,6 +287,8 @@ class MainActivity : AppCompatActivity(), BLECallback {
         statusDot.setBackgroundResource(R.drawable.dot_disconnected)
         tvStatus.text     = "Stopped"
         tvDeviceName.text = "—"
+        switchRelay.isChecked = false
+        tvRelayCount.text = ""
     }
 
     // ══════════════════════════════════════════════════════════════

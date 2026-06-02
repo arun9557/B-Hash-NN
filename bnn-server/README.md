@@ -4,7 +4,7 @@ Offline AI over Bluetooth mesh.
 One device runs the model. Everyone else connects via BLE — no internet needed.
 
 ```
-Phone A ──BLE──► Relay Phone B ──BLE──► Server (Laptop/Pi)
+Phone A ──BLE──► Relay Phone B ──BLE──► Gateway (Laptop/Pi)
                                               │
                                          Ollama AI
 ```
@@ -71,48 +71,117 @@ Every message over BLE is a JSON string:
 
 ```json
 {
-  "msg_id":  "uuid4",
-  "src":     "device_mac_or_server",
-  "dst":     "server_or_device_mac",
-  "type":    "query | response | ping | relay",
+  "id":      "unique-message-id",
+  "type":    "request | response | ping | pong | relay",
   "payload": "the actual text",
+  "src":     "device_id_or_server",
+  "dst":     "server_or_device_id",
   "hops":    0,
   "ttl":     5,
   "ts":      1234567890.123
 }
 ```
 
-- `ttl` (time-to-live): decremented at each mesh relay hop — prevents infinite loops
-- `msg_id`: used for deduplication across mesh floods
+### Field reference
+
+| Field     | Type   | Description                                                    |
+|-----------|--------|----------------------------------------------------------------|
+| `id`      | string | Unique message ID (UUID or device-generated) — used for dedup |
+| `type`    | string | One of: `request`, `response`, `ping`, `pong`, `relay`        |
+| `payload` | string | The actual content (prompt text, AI response, status, etc.)    |
+| `src`     | string | Sender identifier (`"server"`, device MAC, or device ID)       |
+| `dst`     | string | Destination (`"server"`, `"broadcast"`, or specific device)    |
+| `hops`    | int    | Number of relay hops this message has traversed                |
+| `ttl`     | int    | Time-to-live — decremented at each relay hop, prevents loops   |
+| `ts`      | float  | Timestamp (seconds since epoch or since boot)                  |
+
+### Message types
+
+| Type       | Direction        | Description                              |
+|------------|------------------|------------------------------------------|
+| `request`  | Client → Server  | AI prompt from a device                  |
+| `response` | Server → Client  | AI answer back to the device             |
+| `ping`     | Either direction | Heartbeat probe ("are you alive?")       |
+| `pong`     | Either direction | Heartbeat reply ("yes, I'm alive")       |
+| `relay`    | Device → Device  | Mesh-forwarded packet (TTL decremented)  |
 
 ---
 
-## BLE UUIDs (must match client)
+## BLE UUIDs
 
 ```
 Service:  12345678-1234-5678-1234-56789abcdef0
-TX Char:  12345678-1234-5678-1234-56789abcdef1  (client writes)
-RX Char:  12345678-1234-5678-1234-56789abcdef2  (server notifies)
+Char 1:   12345678-1234-5678-1234-56789abcdef1
+Char 2:   12345678-1234-5678-1234-56789abcdef2
 ```
 
-Name your BLE peripheral with "BNN" in the name so the gateway auto-discovers it.
+### Perspective table
+
+The same characteristic is called different things depending on who you are:
+
+| UUID        | Server/Gateway perspective | Phone/ESP32 peripheral perspective |
+|-------------|----------------------------|------------------------------------|
+| `…def1`     | Gateway WRITES to this     | Peripheral receives (RX)           |
+| `…def2`     | Gateway gets NOTIFIED      | Peripheral sends/notifies (TX)     |
+
+> **Rule of thumb:** `def1` = the pipe data flows INTO the peripheral. `def2` = the pipe data flows OUT of the peripheral.
+
+Name your BLE peripheral with **"BNN"** in the name so the gateway auto-discovers it.
 
 ---
 
-## Mesh Range Extension
+## Relay Mode (Mesh)
 
-The more phones connected, the further the range:
+Relay mode extends the network range by letting devices forward messages for each other.
 
 ```
 Phone A (50m) → Phone B (relay, 50m) → Phone C (relay, 50m) → Server
                                                                Total: ~150m
 ```
 
-Each relay device runs the B#NN client app in relay mode (next phase).
+### How relay works
+
+1. Device receives a message with `"type": "relay"` and `ttl > 0`
+2. Device decrements `ttl` by 1, increments `hops` by 1
+3. Device forwards the modified message to the next hop
+4. If `ttl == 0`, the message is discarded (prevents infinite loops)
+
+### Deduplication
+
+Every node keeps a buffer of recently-seen message IDs (`id` field):
+- Gateway: last 2000 IDs
+- Android: handled by BLEManager
+- ESP32: circular buffer of last 50 IDs
+
+Duplicate messages are silently dropped to prevent mesh flooding.
 
 ---
 
-## Model recommendations
+## ESP32 Client Setup
+
+### Hardware
+- Any ESP32 development board (ESP32, ESP32-S3, ESP32-C3)
+- Built-in LED on GPIO 2 (most DevKit boards)
+
+### Software
+1. Install [Arduino IDE](https://www.arduino.cc/en/software) or PlatformIO
+2. Add ESP32 board support:
+   - Arduino IDE: `File → Preferences → Board Manager URLs`, add:  
+     `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
+   - Install "ESP32 by Espressif Systems" from Board Manager
+3. Open `esp32_client/esp32_client.ino`
+4. Select your board (e.g., "ESP32 Dev Module")
+5. Upload and open Serial Monitor at 115200 baud
+
+### Usage
+- The ESP32 will automatically scan for B#NN peripherals
+- Once connected, type a message in Serial Monitor and press Enter
+- AI responses appear in the Serial output
+- LED: **solid** = connected, **blinking** = scanning/disconnected
+
+---
+
+## Model Recommendations
 
 | Device          | Recommended model | RAM needed |
 |-----------------|-------------------|------------|
@@ -123,6 +192,6 @@ Each relay device runs the B#NN client app in relay mode (next phase).
 ---
 
 ## Next: Client Side
-- Android app (BLE GATT client + relay mode)
-- ESP32 / Arduino firmware
+- Android app (BLE GATT client + relay mode) — see `android/`
+- ESP32 / Arduino firmware — see `esp32_client/`
 - Bitchat protocol integration

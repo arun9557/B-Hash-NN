@@ -15,7 +15,7 @@
         android:elevation="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingHorizontal="16dp"
+        android:paddingHorizontal="12dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
@@ -31,7 +31,7 @@
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="8dp"
             android:layout_weight="1"
             android:orientation="vertical">
 
@@ -41,8 +41,10 @@
                 android:layout_height="wrap_content"
                 android:text="B#NN"
                 android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold" />
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:ellipsize="end" />
 
             <TextView
                 android:id="@+id/tvStatus"
@@ -50,8 +52,31 @@
                 android:layout_height="wrap_content"
                 android:text="Initialising…"
                 android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
+                android:textSize="11sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
         </LinearLayout>
+
+        <!-- Relay mode switch -->
+        <Switch
+            android:id="@+id/switchRelay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Relay"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:thumbTint="@color/accent"
+            android:trackTint="@color/text_hint"
+            android:layout_marginEnd="4dp" />
+
+        <!-- Relay peer count -->
+        <TextView
+            android:id="@+id/tvRelayCount"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/accent"
+            android:textSize="11sp"
+            android:layout_marginEnd="8dp" />
 
         <!-- BLE toggle button -->
         <Button
@@ -59,10 +84,10 @@
             android:layout_width="wrap_content"
             android:layout_height="36dp"
             android:backgroundTint="@color/accent"
-            android:paddingHorizontal="14dp"
+            android:paddingHorizontal="10dp"
             android:text="Stop BLE"
             android:textColor="@color/text_primary"
-            android:textSize="12sp"
+            android:textSize="11sp"
             style="@style/Widget.MaterialComponents.Button" />
 
     </LinearLayout>

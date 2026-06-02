@@ -1,5 +1,7 @@
 package com.bnn.app
 
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -16,9 +18,10 @@ import java.util.Locale
 // ══════════════════════════════════════════════════════════════════
 
 data class ChatMessage(
-    val text:      String,
+    val text:       String,
     val isOutgoing: Boolean,           // true = sent by user, false = received from AI
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp:  Long = System.currentTimeMillis(),
+    val isRelay:    Boolean = false     // true = relayed through mesh
 )
 
 // ══════════════════════════════════════════════════════════════════
@@ -49,18 +52,30 @@ class ChatAdapter : RecyclerView.Adapter<ChatAdapter.MessageViewHolder>() {
     override fun onBindViewHolder(holder: MessageViewHolder, position: Int) {
         val msg = messages[position]
 
-        holder.bubble.text    = msg.text
         holder.timestamp.text = timeFormat.format(Date(msg.timestamp))
 
-        if (msg.isOutgoing) {
+        if (msg.isRelay) {
+            // Relayed message — left side, teal accent background
+            holder.container.gravity = Gravity.START
+            holder.bubble.text = "🔁 ${msg.text}"
+            val relayBg = GradientDrawable().apply {
+                setColor(Color.parseColor("#1A3A4A"))  // dark teal
+                cornerRadius = 20f
+            }
+            holder.bubble.background = relayBg
+            holder.bubble.setTextColor(Color.parseColor("#B0E0E6"))  // powder blue text
+            holder.timestamp.gravity = Gravity.START
+        } else if (msg.isOutgoing) {
             // User message — right side, accent colour
             holder.container.gravity = Gravity.END
+            holder.bubble.text = msg.text
             holder.bubble.setBackgroundResource(R.drawable.bubble_outgoing)
             holder.bubble.setTextColor(holder.bubble.context.getColor(R.color.bubble_outgoing_text))
             holder.timestamp.gravity = Gravity.END
         } else {
             // AI/server message — left side, surface colour
             holder.container.gravity = Gravity.START
+            holder.bubble.text = msg.text
             holder.bubble.setBackgroundResource(R.drawable.bubble_incoming)
             holder.bubble.setTextColor(holder.bubble.context.getColor(R.color.bubble_incoming_text))
             holder.timestamp.gravity = Gravity.START

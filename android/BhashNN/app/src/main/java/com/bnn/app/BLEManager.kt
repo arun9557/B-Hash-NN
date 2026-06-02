@@ -6,7 +6,13 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -29,6 +35,9 @@ val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 private const val TAG = "B#NN-BLE"
 private const val DEVICE_NAME = "B#NN_DEVICE"
 private const val HEARTBEAT_INTERVAL_MS = 10_000L   // send ping every 10 seconds
+private const val RELAY_SCAN_PERIOD_MS = 15_000L     // scan for 15s, pause 5s
+private const val RELAY_SCAN_PAUSE_MS = 5_000L
+private const val MAX_SEEN_IDS = 500                  // max dedup cache size
 
 // ══════════════════════════════════════════════════════════════════
 //  CALLBACK INTERFACE  — BLEManager talks back to MainActivity
@@ -40,6 +49,8 @@ interface BLECallback {
     fun onMessageReceived(message: String)
     fun onStatusChanged(status: String)
     fun onError(error: String)
+    fun onRelayPeerConnected(name: String)
+    fun onRelayPeerDisconnected(name: String)
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -73,8 +84,20 @@ class BLEManager(
     private val chunkBuffer = mutableMapOf<String, MutableMap<Int, String>>()  // chunkId -> {index -> data}
     private val chunkMeta   = mutableMapOf<String, Int>()                      // chunkId -> totalChunks
 
+    // ── Relay Mode ────────────────────────────────────────────────
+    private var relayEnabled = false
+    private var bleScanner: BluetoothLeScanner? = null
+    private var isScanning = false
+    private val relayPeers = mutableMapOf<String, BluetoothGatt>()  // address -> BluetoothGatt
+    private val pendingConnections = mutableSetOf<String>()          // addresses currently connecting
+    private val seenMessageIds = LinkedHashSet<String>()             // mesh dedup
+    private var relayScanRunnable: Runnable? = null
+
     val isConnected: Boolean
         get() = connectedDevice != null
+
+    val relayPeerCount: Int
+        get() = relayPeers.size
 
     // ──────────────────────────────────────────────────────────────
     //  START  — setup GATT server and begin advertising
@@ -88,21 +111,344 @@ class BLEManager(
 
         // 1-4. Setup GATT Server and Service first
         setupGattServer()
-        
+
         // 5. THEN start advertising
         startAdvertising()
-        
+
         callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
         Log.i(TAG, "B#NN BLE Peripheral started.")
     }
 
     fun stop() {
         stopHeartbeat()
+        stopRelayScan()
+        disconnectAllRelayPeers()
         stopAdvertising()
         gattServer?.close()
         gattServer = null
         connectedDevice = null
         Log.i(TAG, "B#NN BLE Peripheral stopped.")
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  RELAY MODE  — toggle scanning and forwarding
+    // ──────────────────────────────────────────────────────────────
+
+    fun setRelayMode(enabled: Boolean) {
+        relayEnabled = enabled
+        Log.i(TAG, "Relay mode ${if (enabled) "ENABLED" else "DISABLED"}")
+        if (enabled) {
+            startRelayScan()
+        } else {
+            stopRelayScan()
+            disconnectAllRelayPeers()
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  RELAY SCANNING  — discover nearby B#NN devices
+    // ──────────────────────────────────────────────────────────────
+
+    private fun startRelayScan() {
+        if (isScanning) return
+        bleScanner = bluetoothAdapter.bluetoothLeScanner
+        if (bleScanner == null) {
+            Log.w(TAG, "BLE scanner not available")
+            return
+        }
+        scheduleRelayScanCycle()
+    }
+
+    private fun scheduleRelayScanCycle() {
+        if (!relayEnabled) return
+
+        val scanner = bleScanner ?: return
+
+        val scanSettings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+            .build()
+
+        // Scan for devices advertising the B#NN service UUID
+        val scanFilter = ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(BNN_SERVICE_UUID))
+            .build()
+
+        scanner.startScan(listOf(scanFilter), scanSettings, relayScanCallback)
+        isScanning = true
+        Log.d(TAG, "Relay scan started")
+
+        // Stop scan after RELAY_SCAN_PERIOD_MS, then restart after pause
+        relayScanRunnable = Runnable {
+            stopCurrentScan()
+            if (relayEnabled) {
+                mainHandler.postDelayed({
+                    if (relayEnabled) {
+                        scheduleRelayScanCycle()
+                    }
+                }, RELAY_SCAN_PAUSE_MS)
+            }
+        }
+        mainHandler.postDelayed(relayScanRunnable!!, RELAY_SCAN_PERIOD_MS)
+    }
+
+    private fun stopCurrentScan() {
+        if (!isScanning) return
+        try {
+            bleScanner?.stopScan(relayScanCallback)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping scan: ${e.message}")
+        }
+        isScanning = false
+        Log.d(TAG, "Relay scan stopped")
+    }
+
+    private fun stopRelayScan() {
+        relayScanRunnable?.let { mainHandler.removeCallbacks(it) }
+        relayScanRunnable = null
+        stopCurrentScan()
+        bleScanner = null
+    }
+
+    private val relayScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            val address = device.address
+            val name = device.name ?: ""
+
+            // Skip if already connected or connecting to this device
+            if (relayPeers.containsKey(address) || pendingConnections.contains(address)) return
+
+            // Skip ourselves (shouldn't happen, but just in case)
+            if (address == bluetoothAdapter.address) return
+
+            // Skip the gateway device (already connected as server)
+            if (connectedDevice?.address == address) return
+
+            // Check name or service UUID match for B#NN devices
+            val hasServiceUuid = result.scanRecord?.serviceUuids?.any { it.uuid == BNN_SERVICE_UUID } == true
+            if (name.contains("BNN", ignoreCase = true) || hasServiceUuid) {
+                Log.i(TAG, "Found B#NN relay peer: $name ($address) — connecting…")
+                connectToRelayPeer(device)
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e(TAG, "Relay scan failed: $errorCode")
+            isScanning = false
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  RELAY PEER CONNECTION  — GATT Client
+    // ──────────────────────────────────────────────────────────────
+
+    private fun connectToRelayPeer(device: BluetoothDevice) {
+        pendingConnections.add(device.address)
+        device.connectGatt(context, false, relayGattCallback, BluetoothDevice.TRANSPORT_LE)
+    }
+
+    private fun disconnectAllRelayPeers() {
+        val peers = relayPeers.toMap()
+        relayPeers.clear()
+        pendingConnections.clear()
+        for ((address, gatt) in peers) {
+            try {
+                gatt.disconnect()
+                gatt.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error disconnecting relay peer $address: ${e.message}")
+            }
+            val name = gatt.device.name ?: address
+            mainHandler.post { callback.onRelayPeerDisconnected(name) }
+        }
+    }
+
+    private val relayGattCallback = object : BluetoothGattCallback() {
+
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            val address = gatt.device.address
+            val name = gatt.device.name ?: address
+
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    Log.i(TAG, "Relay peer connected: $name ($address)")
+                    pendingConnections.remove(address)
+                    relayPeers[address] = gatt
+                    gatt.discoverServices()
+                    mainHandler.post { callback.onRelayPeerConnected(name) }
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.i(TAG, "Relay peer disconnected: $name ($address)")
+                    pendingConnections.remove(address)
+                    relayPeers.remove(address)
+                    try {
+                        gatt.close()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error closing relay gatt: ${e.message}")
+                    }
+                    mainHandler.post { callback.onRelayPeerDisconnected(name) }
+                }
+            }
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "Service discovery failed for relay peer: $status")
+                gatt.disconnect()
+                return
+            }
+
+            val service = gatt.getService(BNN_SERVICE_UUID)
+            if (service == null) {
+                Log.w(TAG, "B#NN service not found on relay peer ${gatt.device.address}")
+                gatt.disconnect()
+                return
+            }
+
+            // Subscribe to TX notifications from the relay peer
+            val txChar = service.getCharacteristic(BNN_TX_CHAR_UUID)
+            if (txChar != null) {
+                gatt.setCharacteristicNotification(txChar, true)
+                val cccd = txChar.getDescriptor(CCCD_UUID)
+                if (cccd != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        @Suppress("DEPRECATION")
+                        gatt.writeDescriptor(cccd)
+                    }
+                }
+                Log.i(TAG, "Subscribed to TX notifications on relay peer ${gatt.device.address}")
+            }
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            // Pre-API 33 callback
+            if (characteristic.uuid != BNN_TX_CHAR_UUID) return
+            @Suppress("DEPRECATION")
+            val data = characteristic.value ?: return
+            handleRelayPeerMessage(gatt, data)
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            // API 33+ callback
+            if (characteristic.uuid != BNN_TX_CHAR_UUID) return
+            handleRelayPeerMessage(gatt, value)
+        }
+    }
+
+    private fun handleRelayPeerMessage(gatt: BluetoothGatt, data: ByteArray) {
+        val raw = String(data, Charsets.UTF_8)
+        Log.d(TAG, "Relay peer ${gatt.device.address} sent: ${raw.take(120)}")
+
+        mainHandler.post {
+            val json = tryParseJson(raw) ?: return@post
+
+            // Dedup check
+            val msgId = json.optString("id", "")
+            if (msgId.isNotEmpty() && !addSeenId(msgId)) {
+                Log.d(TAG, "Duplicate relay message $msgId — skipped")
+                return@post
+            }
+
+            // Check TTL
+            val ttl = json.optInt("ttl", 0)
+            if (ttl <= 0) {
+                Log.d(TAG, "Relay message TTL expired — dropped")
+                return@post
+            }
+
+            // Forward to gateway (our GATT server's connected central)
+            forwardToGateway(json)
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  RELAY FORWARDING
+    // ──────────────────────────────────────────────────────────────
+
+    private fun forwardToGateway(msg: JSONObject) {
+        val device = connectedDevice ?: return
+        val txChar = txCharacteristic ?: return
+
+        // Decrement TTL, increment hops
+        val newTtl = msg.optInt("ttl", 5) - 1
+        val newHops = msg.optInt("hops", 0) + 1
+        msg.put("ttl", newTtl)
+        msg.put("hops", newHops)
+
+        val raw = msg.toString().toByteArray(Charsets.UTF_8)
+        if (raw.size <= 512) {
+            sendRawNotification(device, txChar, raw)
+        } else {
+            sendChunked(device, txChar, raw)
+        }
+        Log.d(TAG, "Relayed message to gateway (ttl=$newTtl, hops=$newHops)")
+    }
+
+    private fun forwardToRelayPeers(msg: JSONObject) {
+        if (!relayEnabled || relayPeers.isEmpty()) return
+
+        // Decrement TTL, increment hops
+        val newTtl = msg.optInt("ttl", 5) - 1
+        val newHops = msg.optInt("hops", 0) + 1
+        if (newTtl <= 0) {
+            Log.d(TAG, "Not relaying — TTL would reach 0")
+            return
+        }
+        msg.put("ttl", newTtl)
+        msg.put("hops", newHops)
+
+        val raw = msg.toString().toByteArray(Charsets.UTF_8)
+
+        for ((address, gatt) in relayPeers) {
+            val service = gatt.getService(BNN_SERVICE_UUID) ?: continue
+            val rxChar = service.getCharacteristic(BNN_RX_CHAR_UUID) ?: continue
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(
+                    rxChar, raw,
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                rxChar.value = raw
+                @Suppress("DEPRECATION")
+                rxChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(rxChar)
+            }
+            Log.d(TAG, "Forwarded message to relay peer $address")
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  DEDUP HELPER
+    // ──────────────────────────────────────────────────────────────
+
+    /** Returns true if the ID was newly added, false if already seen. */
+    private fun addSeenId(id: String): Boolean {
+        if (seenMessageIds.contains(id)) return false
+        seenMessageIds.add(id)
+        // Evict oldest entries if cache too large
+        while (seenMessageIds.size > MAX_SEEN_IDS) {
+            val iterator = seenMessageIds.iterator()
+            if (iterator.hasNext()) {
+                iterator.next()
+                iterator.remove()
+            }
+        }
+        return true
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -324,8 +670,14 @@ class BLEManager(
     private fun handleMessage(msg: JSONObject) {
         val type    = msg.optString("type", "unknown")
         val payload = msg.optString("payload", "")
+        val msgId   = msg.optString("id", "")
 
         Log.i(TAG, "Message type=$type payload=${payload.take(80)}")
+
+        // Add to dedup set
+        if (msgId.isNotEmpty()) {
+            addSeenId(msgId)
+        }
 
         when (type) {
             "ping" -> {
@@ -339,13 +691,29 @@ class BLEManager(
             "response" -> {
                 // AI response from server — show in chat
                 callback.onMessageReceived(payload)
+                // Relay to peers if relay mode is on
+                if (relayEnabled && relayPeers.isNotEmpty()) {
+                    // Make a copy so we don't mutate the original
+                    val relayMsg = JSONObject(msg.toString())
+                    forwardToRelayPeers(relayMsg)
+                }
             }
             "request" -> {
                 // Server relayed a request to us? Shouldn't happen normally.
                 callback.onMessageReceived("[request] $payload")
+                // Relay to peers if relay mode is on
+                if (relayEnabled && relayPeers.isNotEmpty()) {
+                    val relayMsg = JSONObject(msg.toString())
+                    forwardToRelayPeers(relayMsg)
+                }
             }
             else -> {
                 Log.w(TAG, "Unknown message type: $type")
+                // Still relay unknown types if relay mode is on
+                if (relayEnabled && relayPeers.isNotEmpty()) {
+                    val relayMsg = JSONObject(msg.toString())
+                    forwardToRelayPeers(relayMsg)
+                }
             }
         }
     }
@@ -407,9 +775,16 @@ class BLEManager(
         txChar: BluetoothGattCharacteristic,
         raw: ByteArray
     ) {
-        txChar.value = raw
-        val success = gattServer?.notifyCharacteristicChanged(device, txChar, false)
-        Log.d(TAG, "Notification sent: ${raw.size} bytes, success=$success")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val result = gattServer?.notifyCharacteristicChanged(device, txChar, false, raw)
+            Log.d(TAG, "Notification sent (API 33+): ${raw.size} bytes, result=$result")
+        } else {
+            @Suppress("DEPRECATION")
+            txChar.value = raw
+            @Suppress("DEPRECATION")
+            val success = gattServer?.notifyCharacteristicChanged(device, txChar, false)
+            Log.d(TAG, "Notification sent (legacy): ${raw.size} bytes, success=$success")
+        }
     }
 
     private fun sendChunked(

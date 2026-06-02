@@ -12,7 +12,7 @@ import requests
 
 # ── config ──────────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434/api/generate"
-MODEL_NAME   = "phi3"          # change to llama3, mistral, etc.
+MODEL_NAME   = "llama3.2:latest"  # Changed default to llama3.2:latest (installed on system)
 MAX_TOKENS   = 512
 TEMPERATURE  = 0.7
 HOST         = "0.0.0.0"
@@ -112,8 +112,30 @@ def model_info():
 # ── internal helper ───────────────────────────────────────────────────────────
 def query_ollama(prompt: str) -> str:
     """Send prompt to Ollama and return the full response string."""
+    model_to_use = MODEL_NAME
+    
+    # Dynamic fallback checks to prevent 404 when configured model is not pulled
+    try:
+        r_tags = requests.get("http://localhost:11434/api/tags", timeout=3)
+        if r_tags.status_code == 200:
+            models = [m["name"] for m in r_tags.json().get("models", [])]
+            if models and MODEL_NAME not in models:
+                # Try matching by base name or prefix
+                match = None
+                for m in models:
+                    if m.startswith(MODEL_NAME) or MODEL_NAME.startswith(m):
+                        match = m
+                        break
+                if match:
+                    model_to_use = match
+                else:
+                    model_to_use = models[0]
+                log.warning(f"Configured model '{MODEL_NAME}' not found in Ollama. Falling back to '{model_to_use}'.")
+    except Exception as e:
+        log.warning(f"Could not verify available Ollama models: {e}")
+
     payload = {
-        "model":  MODEL_NAME,
+        "model":  model_to_use,
         "prompt": prompt,
         "stream": False,
         "options": {
@@ -124,6 +146,7 @@ def query_ollama(prompt: str) -> str:
     r = requests.post(OLLAMA_URL, json=payload, timeout=120)
     r.raise_for_status()
     return r.json().get("response", "").strip()
+
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

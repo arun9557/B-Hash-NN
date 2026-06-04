@@ -32,6 +32,7 @@ fun BnnChatScreen(viewModel: BnnViewModel) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val showPeerSheet by viewModel.showPeerSheet.collectAsStateWithLifecycle()
+    val showAboutSheet by viewModel.showAboutSheet.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
     var forceScrollToBottom by remember { mutableStateOf(false) }
@@ -94,7 +95,8 @@ fun BnnChatScreen(viewModel: BnnViewModel) {
             headerHeight = headerHeight,
             viewModel = viewModel,
             colorScheme = colorScheme,
-            onPeerCounterClick = { viewModel.showPeerSheet() }
+            onPeerCounterClick = { viewModel.showPeerSheet() },
+            onTitleClick = { viewModel.showAboutSheet() }
         )
 
         // ── Divider under header ────────────────────────────────────────
@@ -146,4 +148,10 @@ fun BnnChatScreen(viewModel: BnnViewModel) {
             onDismiss = { viewModel.hidePeerSheet() }
         )
     }
+
+    // ── About/Settings bottom sheet ────────────────────────────────────────
+    BnnAboutSheet(
+        isPresented = showAboutSheet,
+        onDismiss = { viewModel.hideAboutSheet() }
+    )
 }

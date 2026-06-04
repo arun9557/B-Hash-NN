@@ -39,7 +39,8 @@ fun BnnFloatingHeader(
     headerHeight: Dp,
     viewModel: BnnViewModel,
     colorScheme: ColorScheme,
-    onPeerCounterClick: () -> Unit
+    onPeerCounterClick: () -> Unit,
+    onTitleClick: () -> Unit
 ) {
     val isConnected by viewModel.isConnected.collectAsStateWithLifecycle()
     val bleStatus by viewModel.bleStatus.collectAsStateWithLifecycle()
@@ -68,6 +69,9 @@ fun BnnFloatingHeader(
                 ) {
                     // ── Left: Status dot + Brand ─────────────────────
                     Row(
+                        modifier = Modifier
+                            .clickable { onTitleClick() }
+                            .padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {

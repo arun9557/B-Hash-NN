@@ -8,9 +8,13 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import com.bnn.app.BnnThemePreference
+import com.bnn.app.ThemeOption
 
 // ── B#NN Terminal Colour Palette ──────────────────────────────────────────────
 // Dark: Black bg + neon green (matches bitchat iOS/Android terminal aesthetic)
@@ -71,7 +75,15 @@ fun BnnTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) BnnDarkColorScheme else BnnLightColorScheme
+    // Observe app-level theme preference
+    val themePref by BnnThemePreference.theme.collectAsState(initial = ThemeOption.SYSTEM)
+    val shouldUseDark = when (themePref) {
+        ThemeOption.DARK   -> true
+        ThemeOption.LIGHT  -> false
+        ThemeOption.SYSTEM -> darkTheme
+    }
+
+    val colorScheme = if (shouldUseDark) BnnDarkColorScheme else BnnLightColorScheme
 
     val view = LocalView.current
     if (!view.isInEditMode) {
@@ -79,8 +91,8 @@ fun BnnTheme(
             val window = (view.context as Activity).window
             WindowCompat.setDecorFitsSystemWindows(window, false)
             val controller = WindowCompat.getInsetsController(window, view)
-            controller.isAppearanceLightStatusBars = !darkTheme
-            controller.isAppearanceLightNavigationBars = !darkTheme
+            controller.isAppearanceLightStatusBars = !shouldUseDark
+            controller.isAppearanceLightNavigationBars = !shouldUseDark
         }
     }
 
@@ -90,3 +102,4 @@ fun BnnTheme(
         content = content
     )
 }
+

@@ -1,7 +1,6 @@
 package com.bnn.app
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
@@ -9,38 +8,27 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.view.View
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
-import android.widget.*
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bnn.app.ui.BnnChatScreen
+import com.bnn.app.ui.theme.BnnTheme
 
-class MainActivity : AppCompatActivity(), BLECallback {
+/**
+ * MainActivity — entry point.
+ * Handles Android permissions and BT enable flow.
+ * All UI state is owned by BnnViewModel; this Activity just calls setContent.
+ */
+class MainActivity : ComponentActivity() {
 
-    // ── Views ─────────────────────────────────────────────────────
-    private lateinit var recyclerView:  RecyclerView
-    private lateinit var etInput:       EditText
-    private lateinit var btnSend:       ImageButton
-    private lateinit var tvStatus:      TextView
-    private lateinit var tvDeviceName:  TextView
-    private lateinit var statusDot:     View
-    private lateinit var btnToggleBle:  Button
-    private lateinit var progressBar:   ProgressBar
-    private lateinit var switchRelay:   Switch
-    private lateinit var tvRelayCount:  TextView
+    private val viewModel: BnnViewModel by viewModels()
 
-    // ── Chat adapter ───────────────────────────────────────────────
-    private lateinit var chatAdapter: ChatAdapter
-
-    // ── BLE manager ───────────────────────────────────────────────
-    private lateinit var bleManager: BLEManager
-    private var bleRunning = false
-
-    // ── Required BLE permissions ──────────────────────────────────
+    // ── Required BLE permissions ──────────────────────────────────────────────
     private val requiredPermissions: Array<String>
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
@@ -56,204 +44,61 @@ class MainActivity : AppCompatActivity(), BLECallback {
             )
         }
 
-    // ── Permission launcher ────────────────────────────────────────
+    // ── Permission launcher ───────────────────────────────────────────────────
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        val allGranted = results.values.all { it }
-        if (allGranted) {
-            startBle()
-        } else {
-            showToast("BLE permissions denied. App cannot function without them.")
+        if (results.values.all { it }) {
+            viewModel.startBle()
         }
+        // If denied, user can tap Start later — handled via BLE button in header
     }
 
-    // ── Bluetooth enable launcher ──────────────────────────────────
+    // ── Bluetooth enable launcher ─────────────────────────────────────────────
     private val enableBtLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            startBle()
-        } else {
-            showToast("Bluetooth must be enabled to use B#NN.")
+            viewModel.startBle()
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     //  LIFECYCLE
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
 
-        bindViews()
-        setupRecyclerView()
-        setupInputListeners()
+        // Give ViewModel the Application context for BLEManager (safe — Application outlives Activity)
+        viewModel.initBleManager(applicationContext)
 
-        bleManager = BLEManager(this, this)
+        setContent {
+            val darkTheme = isSystemInDarkTheme()
+            BnnTheme(darkTheme = darkTheme) {
+                BnnChatScreen(viewModel = viewModel)
+            }
+        }
 
-        // Auto-start BLE on launch
+        // Auto-start BLE (will ask for permissions / BT enable as needed)
         checkPermissionsAndStart()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (bleRunning) bleManager.stop()
+        // ViewModel handles BLE lifecycle via onCleared()
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  VIEW SETUP
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
+    //  BLE STARTUP FLOW
+    // ══════════════════════════════════════════════════════════════════════════
 
-    private fun bindViews() {
-        recyclerView  = findViewById(R.id.recyclerView)
-        etInput       = findViewById(R.id.etInput)
-        btnSend       = findViewById(R.id.btnSend)
-        tvStatus      = findViewById(R.id.tvStatus)
-        tvDeviceName  = findViewById(R.id.tvDeviceName)
-        statusDot     = findViewById(R.id.statusDot)
-        btnToggleBle  = findViewById(R.id.btnToggleBle)
-        progressBar   = findViewById(R.id.progressBar)
-        switchRelay   = findViewById(R.id.switchRelay)
-        tvRelayCount  = findViewById(R.id.tvRelayCount)
-    }
-
-    private fun setupRecyclerView() {
-        chatAdapter = ChatAdapter()
-        recyclerView.adapter = chatAdapter
-        recyclerView.layoutManager = LinearLayoutManager(this).apply {
-            stackFromEnd = true   // newest messages at bottom
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun setupInputListeners() {
-        // Send button click
-        btnSend.setOnClickListener { sendUserMessage() }
-
-        // Done key on keyboard also sends
-        etInput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_SEND) {
-                sendUserMessage()
-                true
-            } else false
-        }
-
-        // Toggle BLE on/off
-        btnToggleBle.setOnClickListener {
-            if (bleRunning) stopBle() else checkPermissionsAndStart()
-        }
-
-        // Relay mode toggle
-        switchRelay.setOnCheckedChangeListener { _, isChecked ->
-            if (bleRunning) {
-                bleManager.setRelayMode(isChecked)
-                tvRelayCount.text = if (isChecked) "0 peers" else ""
-            } else {
-                switchRelay.isChecked = false
-                showToast("Start BLE first to enable relay mode.")
-            }
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    //  SEND MESSAGE
-    // ══════════════════════════════════════════════════════════════
-
-    private fun sendUserMessage() {
-        val text = etInput.text.toString().trim()
-        if (text.isEmpty()) return
-
-        // Add to chat as outgoing
-        addMessage(text, isOutgoing = true)
-        etInput.setText("")
-        hideKeyboard()
-
-        // Show typing indicator while waiting for AI
-        showTypingIndicator(true)
-
-        // Send via BLE
-        bleManager.sendPrompt(text)
-    }
-
-    private fun addMessage(text: String, isOutgoing: Boolean, isRelay: Boolean = false) {
-        chatAdapter.addMessage(ChatMessage(text, isOutgoing, isRelay = isRelay))
-        scrollToBottom()
-    }
-
-    private fun scrollToBottom() {
-        val last = chatAdapter.getLastIndex()
-        if (last >= 0) recyclerView.smoothScrollToPosition(last)
-    }
-
-    private fun showTypingIndicator(show: Boolean) {
-        progressBar.visibility = if (show) View.VISIBLE else View.GONE
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    //  BLE CALLBACK IMPLEMENTATION
-    // ══════════════════════════════════════════════════════════════
-
-    override fun onConnected(deviceName: String) {
-        runOnUiThread {
-            statusDot.setBackgroundResource(R.drawable.dot_connected)
-            tvStatus.text    = "Connected"
-            tvDeviceName.text = deviceName
-            btnToggleBle.text = "Stop BLE"
-        }
-    }
-
-    override fun onDisconnected() {
-        runOnUiThread {
-            statusDot.setBackgroundResource(R.drawable.dot_disconnected)
-            tvStatus.text     = "Advertising…"
-            tvDeviceName.text = "Waiting for server"
-            showTypingIndicator(false)
-        }
-    }
-
-    override fun onMessageReceived(message: String) {
-        runOnUiThread {
-            showTypingIndicator(false)
-            addMessage(message, isOutgoing = false)
-        }
-    }
-
-    override fun onStatusChanged(status: String) {
-        runOnUiThread {
-            tvStatus.text = status
-        }
-    }
-
-    override fun onError(error: String) {
-        runOnUiThread {
-            showTypingIndicator(false)
-            showToast(error)
-        }
-    }
-
-    override fun onRelayPeerConnected(name: String) {
-        runOnUiThread {
-            val count = bleManager.relayPeerCount
-            tvRelayCount.text = "$count peer${if (count != 1) "s" else ""}"
-            showToast("Relay peer connected: $name")
-        }
-    }
-
-    override fun onRelayPeerDisconnected(name: String) {
-        runOnUiThread {
-            val count = bleManager.relayPeerCount
-            tvRelayCount.text = "$count peer${if (count != 1) "s" else ""}"
-            showToast("Relay peer disconnected: $name")
-        }
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    //  BLE START / STOP
-    // ══════════════════════════════════════════════════════════════
-
-    private fun checkPermissionsAndStart() {
+    /**
+     * Called from:
+     * - onCreate (auto-start)
+     * - BLE Start button in the header → viewModel.startBle() is called after permission grant
+     */
+    fun checkPermissionsAndStart() {
         val missing = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -261,46 +106,12 @@ class MainActivity : AppCompatActivity(), BLECallback {
             permissionLauncher.launch(missing.toTypedArray())
             return
         }
-        // Check Bluetooth is enabled
         val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         if (!btManager.adapter.isEnabled) {
+            @Suppress("DEPRECATION")
             enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             return
         }
-        startBle()
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startBle() {
-        bleManager.start()
-        bleRunning = true
-        btnToggleBle.text = "Stop BLE"
-        statusDot.setBackgroundResource(R.drawable.dot_disconnected)
-        tvStatus.text     = "Advertising…"
-        tvDeviceName.text = "Waiting for server"
-    }
-
-    private fun stopBle() {
-        bleManager.stop()
-        bleRunning = false
-        btnToggleBle.text = "Start BLE"
-        statusDot.setBackgroundResource(R.drawable.dot_disconnected)
-        tvStatus.text     = "Stopped"
-        tvDeviceName.text = "—"
-        switchRelay.isChecked = false
-        tvRelayCount.text = ""
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    //  UTILITY
-    // ══════════════════════════════════════════════════════════════
-
-    private fun hideKeyboard() {
-        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.hideSoftInputFromWindow(etInput.windowToken, 0)
-    }
-
-    private fun showToast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        viewModel.startBle()
     }
 }

@@ -396,8 +396,8 @@ class BLEManager(
         Log.d(TAG, "Relayed message to gateway (ttl=$newTtl, hops=$newHops)")
     }
 
-    private fun forwardToRelayPeers(msg: JSONObject) {
-        if (!relayEnabled || relayPeers.isEmpty()) return
+    private fun relayToAllPeers(msg: JSONObject) {
+        if (!relayEnabled) return
 
         // Decrement TTL, increment hops
         val newTtl = msg.optInt("ttl", 5) - 1
@@ -411,6 +411,7 @@ class BLEManager(
 
         val raw = msg.toString().toByteArray(Charsets.UTF_8)
 
+        // 1. Send to relay client peers (devices we connected to)
         for ((address, gatt) in relayPeers) {
             val service = gatt.getService(BNN_SERVICE_UUID) ?: continue
             val rxChar = service.getCharacteristic(BNN_RX_CHAR_UUID) ?: continue
@@ -428,7 +429,18 @@ class BLEManager(
                 @Suppress("DEPRECATION")
                 gatt.writeCharacteristic(rxChar)
             }
-            Log.d(TAG, "Forwarded message to relay peer $address")
+            Log.d(TAG, "Forwarded to client peer: $address")
+        }
+
+        // 2. Send to server client connections (devices connected to us)
+        val serverDevices = bluetoothManager.getConnectedDevices(BluetoothProfile.GATT_SERVER)
+        val txChar = txCharacteristic
+        if (txChar != null) {
+            for (device in serverDevices) {
+                if (device == connectedDevice) continue // skip gateway
+                sendRawNotification(device, txChar, raw)
+                Log.d(TAG, "Forwarded to server peer: ${device.address}")
+            }
         }
     }
 
@@ -658,7 +670,7 @@ class BLEManager(
     //  MESSAGE HANDLING  — parse JSON, detect chunks, dispatch
     // ──────────────────────────────────────────────────────────────
 
-    private fun handleRawMessage(raw: String) {
+    private fun handleRawMessage(device: BluetoothDevice, raw: String) {
         val json = tryParseJson(raw) ?: run {
             Log.w(TAG, "Malformed packet — ignored.")
             return
@@ -667,17 +679,18 @@ class BLEManager(
         // Is this a chunk of a large message?
         if (json.has("chunk_id")) {
             val assembled = handleChunk(json)
-            if (assembled != null) handleMessage(assembled)
+            if (assembled != null) handleMessage(device, assembled)
             return
         }
 
-        handleMessage(json)
+        handleMessage(device, json)
     }
 
-    private fun handleMessage(msg: JSONObject) {
+    private fun handleMessage(device: BluetoothDevice, msg: JSONObject) {
         val type    = msg.optString("type", "unknown")
         val payload = msg.optString("payload", "")
         val msgId   = msg.optString("id", "")
+        val src     = msg.optString("src", "")
 
         Log.i(TAG, "Message type=$type payload=${payload.take(80)}")
 
@@ -686,9 +699,20 @@ class BLEManager(
             addSeenId(msgId)
         }
 
+        // Identify the gateway/server connection dynamically
+        if (src == "server") {
+            if (connectedDevice != device) {
+                connectedDevice = device
+                val name = device.name ?: "B#NN Server"
+                Log.i(TAG, "Identified gateway server: $name (${device.address})")
+                callback.onConnected(name)
+                startHeartbeat()
+            }
+        }
+
         when (type) {
             "ping" -> {
-                // Laptop is checking we're alive — reply with pong
+                // Laptop/peer is checking we're alive — reply with pong
                 sendMessage(buildMsg("pong", "B#NN device online"))
             }
             "pong" -> {
@@ -699,27 +723,31 @@ class BLEManager(
                 // AI response from server — show in chat
                 callback.onMessageReceived(payload)
                 // Relay to peers if relay mode is on
-                if (relayEnabled && relayPeers.isNotEmpty()) {
-                    // Make a copy so we don't mutate the original
+                if (relayEnabled) {
                     val relayMsg = JSONObject(msg.toString())
-                    forwardToRelayPeers(relayMsg)
+                    relayToAllPeers(relayMsg)
                 }
             }
             "request" -> {
-                // Server relayed a request to us? Shouldn't happen normally.
-                callback.onMessageReceived("[request] $payload")
-                // Relay to peers if relay mode is on
-                if (relayEnabled && relayPeers.isNotEmpty()) {
-                    val relayMsg = JSONObject(msg.toString())
-                    forwardToRelayPeers(relayMsg)
+                // If it is from a peer, forward it to the gateway
+                if (src != "server" && isConnected) {
+                    forwardToGateway(msg)
+                } else {
+                    callback.onMessageReceived("[request] $payload")
+                }
+            }
+            "relay" -> {
+                // Relay message from another device — check TTL and forward to gateway
+                val ttl = msg.optInt("ttl", 0)
+                if (ttl > 0 && isConnected) {
+                    forwardToGateway(msg)
                 }
             }
             else -> {
                 Log.w(TAG, "Unknown message type: $type")
-                // Still relay unknown types if relay mode is on
-                if (relayEnabled && relayPeers.isNotEmpty()) {
+                if (relayEnabled) {
                     val relayMsg = JSONObject(msg.toString())
-                    forwardToRelayPeers(relayMsg)
+                    relayToAllPeers(relayMsg)
                 }
             }
         }

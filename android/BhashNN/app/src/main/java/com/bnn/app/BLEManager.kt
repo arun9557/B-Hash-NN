@@ -576,27 +576,34 @@ class BLEManager(
         ) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    connectedDevice = device
                     val name = device.name ?: device.address
-                    Log.i(TAG, "Connected: $name")
-                    mainHandler.post {
-                        stopAdvertising()
-                        callback.onConnected(name)
-                        startHeartbeat()
-                    }
+                    Log.i(TAG, "Device connected to GATT server: $name (${device.address})")
+                    // Restart advertising after a small delay to make sure we stay discoverable
+                    mainHandler.postDelayed({
+                        if (isAdvertising) {
+                            stopAdvertising()
+                        }
+                        startAdvertising()
+                    }, 1000)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.i(TAG, "Disconnected: ${device.address}")
-                    connectedDevice = null
-                    mainHandler.post {
-                        stopHeartbeat()
-                        callback.onDisconnected()
-                        // Resume advertising with a 2-second delay for stability
-                        mainHandler.postDelayed({
-                            startAdvertising()
-                            callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
-                        }, 2000)
+                    val address = device.address
+                    Log.i(TAG, "Device disconnected from GATT server: $address")
+                    if (device == connectedDevice) {
+                        Log.i(TAG, "Gateway disconnected.")
+                        connectedDevice = null
+                        mainHandler.post {
+                            stopHeartbeat()
+                            callback.onDisconnected()
+                        }
                     }
+                    // Restart advertising to make sure we are visible
+                    mainHandler.postDelayed({
+                        if (isAdvertising) {
+                            stopAdvertising()
+                        }
+                        startAdvertising()
+                    }, 1000)
                 }
             }
         }
@@ -622,9 +629,9 @@ class BLEManager(
             if (characteristic.uuid != BNN_RX_CHAR_UUID) return
 
             val raw = String(value, Charsets.UTF_8)
-            Log.d(TAG, "Received raw: ${raw.take(120)}")
+            Log.d(TAG, "Received raw from ${device.address}: ${raw.take(120)}")
 
-            mainHandler.post { handleRawMessage(raw) }
+            mainHandler.post { handleRawMessage(device, raw) }
         }
 
         // Central wrote to a descriptor (e.g. enabling notifications on TX)

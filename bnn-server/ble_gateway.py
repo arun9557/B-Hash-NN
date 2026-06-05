@@ -384,6 +384,7 @@ class BNNGateway:
                 {
                     "type": "request",
                     "id": "1",
+                    "src": "server",
                     "payload": TEST_HELLO_PAYLOAD,
                 }
             ).encode("utf-8")

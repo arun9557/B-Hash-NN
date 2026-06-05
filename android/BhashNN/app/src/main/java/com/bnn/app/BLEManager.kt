@@ -720,8 +720,12 @@ class BLEManager(
                 Log.d(TAG, "Heartbeat acknowledged by server.")
             }
             "response" -> {
-                // AI response from server — show in chat
-                callback.onMessageReceived(payload)
+                // AI response from server — show in chat only if meant for us
+                val dst = msg.optString("dst", "")
+                val myId = BnnDeviceIdentifier.get(context)
+                if (dst.isEmpty() || dst == "broadcast" || dst.equals(myId, ignoreCase = true)) {
+                    callback.onMessageReceived(payload)
+                }
                 // Relay to peers if relay mode is on
                 if (relayEnabled) {
                     val relayMsg = JSONObject(msg.toString())
@@ -902,7 +906,7 @@ class BLEManager(
             put("id",      java.util.UUID.randomUUID().toString())
             put("type",    type)
             put("payload", payload)
-            put("src",     bluetoothAdapter.address ?: "android")
+            put("src",     BnnDeviceIdentifier.get(context))
             put("dst",     "server")
             put("hops",    0)
             put("ttl",     5)

@@ -33,7 +33,7 @@ val BNN_TX_CHAR_UUID: UUID = UUID.fromString("12345678-1234-5678-1234-56789abcde
 val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
 private const val TAG = "B#NN-BLE"
-private const val DEVICE_NAME = "B#NN_DEVICE"
+private const val DEFAULT_DEVICE_NAME = "B#NN_DEVICE"
 private const val HEARTBEAT_INTERVAL_MS = 10_000L   // send ping every 10 seconds
 private const val RELAY_SCAN_PERIOD_MS = 15_000L     // scan for 15s, pause 5s
 private const val RELAY_SCAN_PAUSE_MS = 5_000L
@@ -46,7 +46,7 @@ private const val MAX_SEEN_IDS = 500                  // max dedup cache size
 interface BLECallback {
     fun onConnected(deviceName: String)
     fun onDisconnected()
-    fun onMessageReceived(message: String)
+    fun onMessageReceived(message: String, isRelay: Boolean = false)
     fun onStatusChanged(status: String)
     fun onError(error: String)
     fun onRelayPeerConnected(name: String)
@@ -115,7 +115,8 @@ class BLEManager(
         // 5. THEN start advertising
         startAdvertising()
 
-        callback.onStatusChanged("Advertising as \"$DEVICE_NAME\"…")
+        val myName = BnnDeviceIdentifier.get(context)
+        callback.onStatusChanged("Advertising as \"$myName\"…")
         Log.i(TAG, "B#NN BLE Peripheral started.")
     }
 
@@ -168,15 +169,13 @@ class BLEManager(
             .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .build()
 
-        // Scan filters: match either service UUID or device name
-        val filter1 = ScanFilter.Builder()
+        // Scan filters: match the B#NN service UUID. We do not restrict by device name
+        // at the OS level to avoid filtering bugs on various Android BLE stacks.
+        val scanFilter = ScanFilter.Builder()
             .setServiceUuid(ParcelUuid(BNN_SERVICE_UUID))
             .build()
-        val filter2 = ScanFilter.Builder()
-            .setDeviceName("B#NN_DEVICE")
-            .build()
 
-        scanner.startScan(listOf(filter1, filter2), scanSettings, relayScanCallback)
+        scanner.startScan(listOf(scanFilter), scanSettings, relayScanCallback)
         isScanning = true
         Log.d(TAG, "Relay scan started with UUID and name filters")
 
@@ -227,12 +226,23 @@ class BLEManager(
             // Skip the gateway device (already connected as server)
             if (connectedDevice?.address == address) return
 
+            val myName = BnnDeviceIdentifier.get(context)
+            // Symmetrical connection avoidance: only connect if our name is alphabetically
+            // smaller than the peer's name/address. This ensures exactly one client-server link.
+            val peerId = if (name.isNotEmpty()) name else address
+            val shouldConnect = myName.compareTo(peerId) < 0
+
             // Check name or service UUID match for B#NN devices
             val hasServiceUuid = result.scanRecord?.serviceUuids?.any { it.uuid == BNN_SERVICE_UUID } == true
-            val isBnnName = name.contains("BNN", ignoreCase = true) || name.contains("B#NN", ignoreCase = true)
+            val isBnnName = name.startsWith("Phone_", ignoreCase = true) || name.contains("BNN", ignoreCase = true) || name.contains("B#NN", ignoreCase = true)
+            
             if (isBnnName || hasServiceUuid) {
-                Log.i(TAG, "Found B#NN relay peer: $name ($address) — connecting…")
-                connectToRelayPeer(device)
+                if (shouldConnect) {
+                    Log.i(TAG, "Found B#NN relay peer: $name ($address) — connecting…")
+                    connectToRelayPeer(device)
+                } else {
+                    Log.d(TAG, "Skipping relay connection to $name ($address) to avoid duplicate link (waiting for them to connect to us)")
+                }
             }
         }
 
@@ -372,8 +382,24 @@ class BLEManager(
                 return@post
             }
 
-            // Forward to gateway (our GATT server's connected central)
-            forwardToGateway(json)
+            val type = json.optString("type")
+            val dst = json.optString("dst")
+            val payload = json.optString("payload")
+            val myId = BnnDeviceIdentifier.get(context)
+
+            // 1. If it is a response meant for us, display it in the chat!
+            if (type == "response" || type == "relay") {
+                if (dst.equals(myId, ignoreCase = true) || dst == "broadcast" || dst.isEmpty()) {
+                    callback.onMessageReceived(payload, true)
+                }
+            }
+
+            // 2. Route/forward to other devices
+            if (isConnected) {
+                forwardToGateway(json)
+            } else if (relayEnabled) {
+                relayToAllPeers(json)
+            }
         }
     }
 
@@ -529,8 +555,9 @@ class BLEManager(
             return
         }
 
-        // Set device name
-        bluetoothAdapter.name = DEVICE_NAME
+        // Set unique device name
+        val myName = BnnDeviceIdentifier.get(context)
+        bluetoothAdapter.name = myName
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
@@ -695,6 +722,7 @@ class BLEManager(
         val payload = msg.optString("payload", "")
         val msgId   = msg.optString("id", "")
         val src     = msg.optString("src", "")
+        val dst     = msg.optString("dst", "")
 
         Log.i(TAG, "Message type=$type payload=${payload.take(80)}")
 
@@ -728,7 +756,8 @@ class BLEManager(
                 val dst = msg.optString("dst", "")
                 val myId = BnnDeviceIdentifier.get(context)
                 if (dst.isEmpty() || dst == "broadcast" || dst.equals(myId, ignoreCase = true)) {
-                    callback.onMessageReceived(payload)
+                    val hops = msg.optInt("hops", 0)
+                    callback.onMessageReceived(payload, hops > 0)
                 }
                 // Relay to peers if relay mode is on
                 if (relayEnabled) {
@@ -737,18 +766,29 @@ class BLEManager(
                 }
             }
             "request" -> {
-                // If it is from a peer, forward it to the gateway
-                if (src != "server" && isConnected) {
-                    forwardToGateway(msg)
+                // If it is from a peer, forward it to the gateway (or relay to peers if not directly connected but in relay mode)
+                if (src != "server") {
+                    if (isConnected) {
+                        forwardToGateway(msg)
+                    } else if (relayEnabled) {
+                        val relayMsg = JSONObject(msg.toString())
+                        relayToAllPeers(relayMsg)
+                    }
                 } else {
-                    callback.onMessageReceived("[request] $payload")
+                    val hops = msg.optInt("hops", 0)
+                    callback.onMessageReceived("[request] $payload", hops > 0)
                 }
             }
             "relay" -> {
-                // Relay message from another device — check TTL and forward to gateway
-                val ttl = msg.optInt("ttl", 0)
-                if (ttl > 0 && isConnected) {
-                    forwardToGateway(msg)
+                // If this is a response meant for us, display it!
+                val myId = BnnDeviceIdentifier.get(context)
+                if (dst.equals(myId, ignoreCase = true) || dst == "broadcast") {
+                    callback.onMessageReceived(payload, true)
+                }
+                // Also forward/relay it further if TTL allows and relay mode is enabled
+                if (relayEnabled) {
+                    val relayMsg = JSONObject(msg.toString())
+                    relayToAllPeers(relayMsg)
                 }
             }
             else -> {
@@ -861,13 +901,27 @@ class BLEManager(
     // ──────────────────────────────────────────────────────────────
 
     fun sendPrompt(text: String) {
-        if (!isConnected) {
-            callback.onError("Not connected to B#NN server.")
-            return
-        }
         val msg = buildMsg("request", text)
-        sendMessage(msg)
-        Log.i(TAG, "Prompt sent: ${text.take(60)}")
+        val msgId = msg.optString("id", "")
+        if (msgId.isNotEmpty()) {
+            addSeenId(msgId)
+        }
+
+        if (isConnected) {
+            sendMessage(msg)
+            Log.i(TAG, "Prompt sent directly to gateway: ${text.take(60)}")
+        } else {
+            val serverDevices = bluetoothManager.getConnectedDevices(BluetoothProfile.GATT_SERVER)
+            val hasClientPeers = relayPeerCount > 0
+            val hasServerPeers = serverDevices.any { it != connectedDevice }
+
+            if (hasClientPeers || hasServerPeers) {
+                relayToAllPeers(msg)
+                Log.i(TAG, "Prompt sent via mesh relay (clientPeers=$relayPeerCount, serverPeers=${serverDevices.size}): ${text.take(60)}")
+            } else {
+                callback.onError("No connection to B#NN mesh network.")
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────

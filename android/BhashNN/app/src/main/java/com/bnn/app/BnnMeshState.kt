@@ -54,9 +54,9 @@ class BnnMeshState : BLECallback {
         _isLoading.value = false
     }
 
-    override fun onMessageReceived(message: String) {
+    override fun onMessageReceived(message: String, isRelay: Boolean) {
         _isLoading.value = false
-        _messages.value = _messages.value + ChatMessage(message, isOutgoing = false)
+        _messages.value = _messages.value + ChatMessage(message, isOutgoing = false, isRelay = isRelay)
     }
 
     override fun onStatusChanged(status: String) {

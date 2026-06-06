@@ -36,6 +36,7 @@ class MainActivity : ComponentActivity() {
                 permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
                 permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
                 permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+                permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
             } else {
                 permissions.add(Manifest.permission.BLUETOOTH)
                 permissions.add(Manifest.permission.BLUETOOTH_ADMIN)

@@ -168,14 +168,17 @@ class BLEManager(
             .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .build()
 
-        // Scan for devices advertising the B#NN service UUID
-        val scanFilter = ScanFilter.Builder()
+        // Scan filters: match either service UUID or device name
+        val filter1 = ScanFilter.Builder()
             .setServiceUuid(ParcelUuid(BNN_SERVICE_UUID))
             .build()
+        val filter2 = ScanFilter.Builder()
+            .setDeviceName("B#NN_DEVICE")
+            .build()
 
-        scanner.startScan(listOf(scanFilter), scanSettings, relayScanCallback)
+        scanner.startScan(listOf(filter1, filter2), scanSettings, relayScanCallback)
         isScanning = true
-        Log.d(TAG, "Relay scan started")
+        Log.d(TAG, "Relay scan started with UUID and name filters")
 
         // Stop scan after RELAY_SCAN_PERIOD_MS, then restart after pause
         relayScanRunnable = Runnable {
@@ -226,7 +229,8 @@ class BLEManager(
 
             // Check name or service UUID match for B#NN devices
             val hasServiceUuid = result.scanRecord?.serviceUuids?.any { it.uuid == BNN_SERVICE_UUID } == true
-            if (name.contains("BNN", ignoreCase = true) || hasServiceUuid) {
+            val isBnnName = name.contains("BNN", ignoreCase = true) || name.contains("B#NN", ignoreCase = true)
+            if (isBnnName || hasServiceUuid) {
                 Log.i(TAG, "Found B#NN relay peer: $name ($address) — connecting…")
                 connectToRelayPeer(device)
             }

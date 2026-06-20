@@ -32,9 +32,29 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- ── WiFi Mesh Permissions ── -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- WiFi Direct (P2P) — no extra permission beyond above on Android 13+ -->
+    <!-- WiFi Aware (NAN) — Android 8+ -->
+    <uses-permission android:name="android.permission.OVERRIDE_WIFI_CONFIG"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Android 13+: Nearby WiFi Devices (replaces ACCESS_FINE_LOCATION for WiFi scans) -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
     <!-- Require BLE hardware -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- WiFi Aware hardware (optional — app still works without it) -->
+    <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
+    <!-- WiFi Direct hardware (optional) -->
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
     <application
         android:name=".BnnApp"

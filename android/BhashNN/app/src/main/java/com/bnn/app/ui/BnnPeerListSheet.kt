@@ -9,29 +9,39 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.Circle
+import androidx.compose.material.icons.filled.NetworkWifi
+import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.SignalWifi4Bar
 import androidx.compose.material.icons.filled.WifiTethering
-import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bnn.app.BnnViewModel
+import com.bnn.app.transport.TransportType
 import com.bnn.app.ui.theme.NeonGreen
 import com.bnn.app.ui.theme.RelayTeal
 
+// Additional transport colors
+private val WifiLanColor = androidx.compose.ui.graphics.Color(0xFF2196F3)    // Blue
+private val WifiDirectColor = androidx.compose.ui.graphics.Color(0xFFFF9800)  // Orange
+private val WifiAwareColor = androidx.compose.ui.graphics.Color(0xFF9C27B0)   // Purple
+
 /**
  * BnnPeerListSheet — "Your Network" bottom sheet.
- * Shows:
- *   - BLE PEERS section (gateway + direct BLE connections)
- *   - RELAY PEERS section (mesh relay peers when relay mode is ON)
- * Mirrors bitchat's MeshPeerListSheet design.
+ * Shows peers grouped by transport type:
+ *   - BLE PEERS (gateway + direct BLE)
+ *   - RELAY PEERS (BLE mesh relay peers)
+ *   - WIFI LAN peers
+ *   - WIFI DIRECT peers
+ *   - WIFI AWARE peers
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,16 +50,18 @@ fun BnnPeerListSheet(
     onDismiss: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val connectedPeers by viewModel.connectedPeers.collectAsStateWithLifecycle()
-    val relayPeers by viewModel.relayPeers.collectAsStateWithLifecycle()
-    val relayEnabled by viewModel.relayEnabled.collectAsStateWithLifecycle()
-    val isConnected by viewModel.isConnected.collectAsStateWithLifecycle()
-    val deviceName by viewModel.deviceName.collectAsStateWithLifecycle()
+    val connectedPeers   by viewModel.connectedPeers.collectAsStateWithLifecycle()
+    val relayPeers       by viewModel.relayPeers.collectAsStateWithLifecycle()
+    val wifiLanPeers     by viewModel.wifiLanPeers.collectAsStateWithLifecycle()
+    val wifiDirectPeers  by viewModel.wifiDirectPeers.collectAsStateWithLifecycle()
+    val wifiAwarePeers   by viewModel.wifiAwarePeers.collectAsStateWithLifecycle()
+    val relayEnabled     by viewModel.relayEnabled.collectAsStateWithLifecycle()
+    val isConnected      by viewModel.isConnected.collectAsStateWithLifecycle()
+    val activeTransports by viewModel.activeTransports.collectAsStateWithLifecycle()
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val listState = rememberLazyListState()
 
-    // Animated top bar alpha (fades in as user scrolls)
     val isScrolled by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0
@@ -60,14 +72,14 @@ fun BnnPeerListSheet(
         label = "topBarAlpha"
     )
 
-    val totalCount = connectedPeers.size + relayPeers.size
+    val totalCount = connectedPeers.size + relayPeers.size +
+            wifiLanPeers.size + wifiDirectPeers.size + wifiAwarePeers.size
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = colorScheme.surface,
         dragHandle = {
-            // Custom drag handle in neon green
             Surface(
                 modifier = Modifier
                     .padding(top = 12.dp, bottom = 8.dp)
@@ -78,12 +90,11 @@ fun BnnPeerListSheet(
         }
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
-            // Scrollable content
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 200.dp, max = 600.dp),
+                    .heightIn(min = 200.dp, max = 680.dp),
                 contentPadding = PaddingValues(top = 64.dp, bottom = 32.dp)
             ) {
                 // ── Summary header ─────────────────────────────────────
@@ -91,18 +102,15 @@ fun BnnPeerListSheet(
                     NetworkSummaryBanner(
                         totalPeers = totalCount,
                         isConnected = isConnected,
+                        activeTransports = activeTransports,
                         colorScheme = colorScheme
                     )
                 }
 
                 // ── BLE PEERS section ──────────────────────────────────
                 item(key = "ble_header") {
-                    SectionHeader(
-                        text = "BLE PEERS",
-                        colorScheme = colorScheme
-                    )
+                    SectionHeader(text = "BLE PEERS", colorScheme = colorScheme)
                 }
-
                 if (connectedPeers.isEmpty()) {
                     item(key = "ble_empty") {
                         EmptyHint(
@@ -111,50 +119,74 @@ fun BnnPeerListSheet(
                         )
                     }
                 } else {
-                    items(
-                        items = connectedPeers,
-                        key = { "ble_$it" }
-                    ) { peer ->
-                        PeerRow(
-                            name = peer,
-                            icon = Icons.Filled.Bluetooth,
-                            iconTint = NeonGreen,
-                            isDirect = true,
-                            colorScheme = colorScheme
-                        )
+                    items(items = connectedPeers, key = { "ble_$it" }) { peer ->
+                        PeerRow(name = peer, icon = Icons.Filled.Bluetooth,
+                            iconTint = NeonGreen, label = "BLE · direct", colorScheme = colorScheme)
                     }
                 }
 
-                // ── RELAY PEERS section (only when relay mode ON) ─────
+                // ── RELAY PEERS section ────────────────────────────────
                 if (relayEnabled) {
                     item(key = "relay_header") {
                         Spacer(modifier = Modifier.height(8.dp))
-                        SectionHeader(
-                            text = "RELAY PEERS",
-                            colorScheme = colorScheme
-                        )
+                        SectionHeader(text = "BLE RELAY PEERS", colorScheme = colorScheme)
                     }
-
                     if (relayPeers.isEmpty()) {
                         item(key = "relay_empty") {
-                            EmptyHint(
-                                text = "Scanning for mesh peers…",
-                                colorScheme = colorScheme
-                            )
+                            EmptyHint(text = "Scanning for mesh peers…", colorScheme = colorScheme)
                         }
                     } else {
-                        items(
-                            items = relayPeers,
-                            key = { "relay_$it" }
-                        ) { peer ->
-                            PeerRow(
-                                name = peer,
-                                icon = Icons.Filled.WifiTethering,
-                                iconTint = RelayTeal,
-                                isDirect = false,
-                                colorScheme = colorScheme
-                            )
+                        items(items = relayPeers, key = { "relay_$it" }) { peer ->
+                            PeerRow(name = peer, icon = Icons.Filled.WifiTethering,
+                                iconTint = RelayTeal, label = "BLE · relay", colorScheme = colorScheme)
                         }
+                    }
+                }
+
+                // ── WIFI LAN PEERS section ─────────────────────────────
+                if (wifiLanPeers.isNotEmpty()) {
+                    item(key = "wlan_header") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SectionHeader(text = "WIFI LAN PEERS", colorScheme = colorScheme)
+                    }
+                    items(items = wifiLanPeers, key = { "wlan_$it" }) { peer ->
+                        PeerRow(name = peer, icon = Icons.Filled.NetworkWifi,
+                            iconTint = WifiLanColor, label = "WiFi LAN", colorScheme = colorScheme)
+                    }
+                }
+
+                // ── WIFI DIRECT PEERS section ──────────────────────────
+                if (wifiDirectPeers.isNotEmpty()) {
+                    item(key = "wdirect_header") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SectionHeader(text = "WIFI DIRECT PEERS", colorScheme = colorScheme)
+                    }
+                    items(items = wifiDirectPeers, key = { "wdirect_$it" }) { peer ->
+                        PeerRow(name = peer, icon = Icons.Filled.Router,
+                            iconTint = WifiDirectColor, label = "WiFi Direct", colorScheme = colorScheme)
+                    }
+                }
+
+                // ── WIFI AWARE PEERS section ───────────────────────────
+                if (wifiAwarePeers.isNotEmpty()) {
+                    item(key = "wnanan_header") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SectionHeader(text = "WIFI AWARE PEERS", colorScheme = colorScheme)
+                    }
+                    items(items = wifiAwarePeers, key = { "wnan_$it" }) { peer ->
+                        PeerRow(name = peer, icon = Icons.Filled.SignalWifi4Bar,
+                            iconTint = WifiAwareColor, label = "WiFi Aware", colorScheme = colorScheme)
+                    }
+                }
+
+                // ── Empty state ────────────────────────────────────────
+                if (totalCount == 0) {
+                    item(key = "all_empty") {
+                        Spacer(modifier = Modifier.height(24.dp))
+                        EmptyHint(
+                            text = "No peers found yet.\nEnable mesh and scan for nearby B#NN devices.",
+                            colorScheme = colorScheme
+                        )
                     }
                 }
             }
@@ -173,15 +205,27 @@ fun BnnPeerListSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Your Network",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp
-                        ),
-                        color = NeonGreen
-                    )
+                    Column {
+                        Text(
+                            text = "Your Network",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp
+                            ),
+                            color = NeonGreen
+                        )
+                        if (activeTransports.isNotEmpty()) {
+                            Text(
+                                text = activeTransports.joinToString(" · ") { it.emoji + " " + it.displayName },
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                color = colorScheme.onSurface.copy(alpha = 0.5f),
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
                     TextButton(onClick = onDismiss) {
                         Text(
                             text = "Done",
@@ -197,27 +241,25 @@ fun BnnPeerListSheet(
     }
 }
 
-// ── Network summary banner ───────────────────────────────────────────────────
+// ── Network summary banner ────────────────────────────────────────────────────
 
 @Composable
 private fun NetworkSummaryBanner(
     totalPeers: Int,
     isConnected: Boolean,
+    activeTransports: List<TransportType>,
     colorScheme: ColorScheme
 ) {
-    val bannerColor = when {
-        totalPeers > 0 -> NeonGreen.copy(alpha = 0.08f)
-        else -> Color.Transparent
-    }
-    val textColor = when {
-        isConnected && totalPeers > 0 -> NeonGreen
-        else -> colorScheme.onSurface.copy(alpha = 0.4f)
-    }
-    val summaryText = when {
-        totalPeers == 0 -> "No peers connected"
-        totalPeers == 1 -> "1 peer connected"
+    val bannerColor = if (totalPeers > 0) NeonGreen.copy(alpha = 0.08f) else Color.Transparent
+    val textColor = if (isConnected && totalPeers > 0) NeonGreen
+                    else colorScheme.onSurface.copy(alpha = 0.4f)
+    val summaryText = when (totalPeers) {
+        0    -> "No peers connected"
+        1    -> "1 peer connected"
         else -> "$totalPeers peers connected"
     }
+    val transportSummary = if (activeTransports.isEmpty()) "BLE only"
+                           else activeTransports.joinToString(" + ") { it.displayName }
 
     Surface(
         modifier = Modifier
@@ -225,23 +267,30 @@ private fun NetworkSummaryBanner(
             .padding(horizontal = 24.dp, vertical = 8.dp),
         shape = RoundedCornerShape(10.dp),
         color = bannerColor,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp, textColor.copy(alpha = 0.3f)
-        )
+        border = androidx.compose.foundation.BorderStroke(1.dp, textColor.copy(alpha = 0.3f))
     ) {
-        Text(
-            text = summaryText,
-            style = MaterialTheme.typography.bodyMedium.copy(
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold
-            ),
-            color = textColor,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-        )
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            Text(
+                text = summaryText,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                ),
+                color = textColor
+            )
+            Text(
+                text = "Transports: $transportSummary",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = FontFamily.Monospace
+                ),
+                color = textColor.copy(alpha = 0.7f),
+                fontSize = 10.sp
+            )
+        }
     }
 }
 
-// ── Section header ───────────────────────────────────────────────────────────
+// ── Section header ────────────────────────────────────────────────────────────
 
 @Composable
 private fun SectionHeader(text: String, colorScheme: ColorScheme) {
@@ -260,15 +309,13 @@ private fun SectionHeader(text: String, colorScheme: ColorScheme) {
     )
 }
 
-// ── Empty hint ───────────────────────────────────────────────────────────────
+// ── Empty hint ────────────────────────────────────────────────────────────────
 
 @Composable
 private fun EmptyHint(text: String, colorScheme: ColorScheme) {
     Text(
         text = text,
-        style = MaterialTheme.typography.bodySmall.copy(
-            fontFamily = FontFamily.Monospace
-        ),
+        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         color = colorScheme.onSurface.copy(alpha = 0.35f),
         modifier = Modifier
             .fillMaxWidth()
@@ -281,9 +328,9 @@ private fun EmptyHint(text: String, colorScheme: ColorScheme) {
 @Composable
 private fun PeerRow(
     name: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     iconTint: Color,
-    isDirect: Boolean,
+    label: String,
     colorScheme: ColorScheme
 ) {
     Surface(
@@ -299,15 +346,12 @@ private fun PeerRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // BT / Relay icon
             Icon(
                 imageVector = icon,
-                contentDescription = if (isDirect) "Direct BLE" else "Relay peer",
+                contentDescription = label,
                 tint = iconTint,
                 modifier = Modifier.size(16.dp)
             )
-
-            // Peer name in theme color
             Text(
                 text = name,
                 style = MaterialTheme.typography.bodyMedium.copy(
@@ -316,10 +360,8 @@ private fun PeerRow(
                 color = iconTint,
                 modifier = Modifier.weight(1f)
             )
-
-            // Connection type label
             Text(
-                text = if (isDirect) "direct" else "relay",
+                text = label,
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontFamily = FontFamily.Monospace
                 ),
@@ -328,7 +370,6 @@ private fun PeerRow(
             )
         }
     }
-
     HorizontalDivider(
         modifier = Modifier.padding(horizontal = 40.dp),
         color = colorScheme.outline.copy(alpha = 0.15f),

@@ -130,7 +130,8 @@ class TransportManager(
 
         // Try preferred transport first
         val preferred = getTransport(preferredType)
-        if (preferred != null && preferred.isAvailable && preferred.sendTo(peerId, packet)) {
+        if (preferred != null && preferred.isAvailable && preferred.connectedPeers().contains(peerId)) {
+            preferred.sendTo(peerId, packet)
             Log.d(TAG, "Sent to $peerId via ${preferredType.displayName}")
             return true
         }
@@ -144,9 +145,10 @@ class TransportManager(
         )
         for (transport in fallbackOrder) {
             if (transport == null || !transport.isAvailable) continue
-            if (transport.type == preferredType) continue  // already tried
-            if (transport.sendTo(peerId, packet)) {
-                routeTable.update(peerId, transport.type)  // update route
+            if (transport.type == preferredType) continue
+            if (transport.connectedPeers().contains(peerId) || transport.type == TransportType.BLE) {
+                transport.sendTo(peerId, packet)
+                routeTable.update(peerId, transport.type)
                 Log.d(TAG, "Fallback: sent to $peerId via ${transport.type.displayName}")
                 return true
             }
@@ -175,12 +177,12 @@ class TransportManager(
 
     /** All connected peers from all transports (deduped by ID) */
     fun allConnectedPeers(): Set<String> {
-        return transports.flatMap { it.connectedPeerIds }.toSet()
+        return transports.flatMap { it.connectedPeers() }.toSet()
     }
 
     fun peersByTransport(): Map<TransportType, List<String>> {
         return transports.associate { t ->
-            t.type to t.connectedPeerIds.toList()
+            t.type to t.connectedPeers().toList()
         }
     }
 

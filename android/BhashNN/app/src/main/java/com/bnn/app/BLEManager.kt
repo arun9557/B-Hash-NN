@@ -99,6 +99,20 @@ class BLEManager(
     val relayPeerCount: Int
         get() = relayPeers.size
 
+    /** ID of the connected BLE gateway (laptop), or null if not connected */
+    val connectedGatewayId: String?
+        get() = connectedDevice?.address
+
+    /** Send a raw JSON string over BLE — used by BLETransportAdapter */
+    fun sendRawPacket(jsonStr: String) {
+        try {
+            val json = org.json.JSONObject(jsonStr)
+            sendMessage(json)
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "sendRawPacket failed: ${e.message}")
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  START  — setup GATT server and begin advertising
     // ──────────────────────────────────────────────────────────────

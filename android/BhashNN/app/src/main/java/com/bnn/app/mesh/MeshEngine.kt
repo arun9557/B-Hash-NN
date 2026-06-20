@@ -123,8 +123,6 @@ class MeshEngine(
     }
 
     private fun forwardToServer(packet: MeshPacket, fromPeerId: String) {
-        // In our architecture, "server" is a BLE gateway peer.
-        // Find any peer in route table that is the gateway (connected via BLE to laptop)
         val gatewayPeers = routeTable.peersByTransport(TransportType.BLE)
         if (gatewayPeers.isNotEmpty()) {
             val forwarded = packet.copy(hops = packet.hops + 1, ttl = packet.ttl - 1)
@@ -137,19 +135,13 @@ class MeshEngine(
     }
 
     private fun forwardToPeer(packet: MeshPacket, fromPeerId: String) {
-        if (packet.ttl <= 0) {
-            Log.w(TAG, "TTL expired for packet ${packet.id}")
-            return
-        }
+        if (packet.ttl <= 0) { Log.w(TAG, "TTL expired for ${packet.id}"); return }
         val forwarded = packet.copy(hops = packet.hops + 1, ttl = packet.ttl - 1)
-
-        // Direct route known?
         val targetPeer = packet.dst
         val allPeers = transportManager?.allConnectedPeers() ?: emptySet()
         if (allPeers.contains(targetPeer)) {
             transportManager?.sendTo(targetPeer, forwarded)
         } else {
-            // Flood — destination not directly reachable
             relayToMesh(forwarded, fromPeerId)
         }
     }

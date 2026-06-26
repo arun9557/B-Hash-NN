@@ -57,17 +57,42 @@ class BnnForegroundService : Service() {
         if (app.bleManager == null) {
             app.bleManager = BLEManager(applicationContext, app.meshState)
         }
-        app.bleManager?.start()
-        app.meshState.onStatusChanged("Advertising…")
+
+        // Initialize and start the full MeshEngine (BLE + WiFi transports)
+        if (app.meshEngine == null) {
+            val engine = com.bnn.app.mesh.MeshEngine(
+                myId = BnnDeviceIdentifier.get(applicationContext),
+                callback = app.meshState
+            )
+            val bleTransport = BLETransportAdapter(app.bleManager!!)
+            val transportManager = com.bnn.app.transport.TransportManager(
+                context = applicationContext,
+                myId = BnnDeviceIdentifier.get(applicationContext),
+                routeTable = engine.routeTable,
+                onIncomingPacket = { packet, fromPeer, transport ->
+                    if (transport != com.bnn.app.transport.TransportType.BLE) {
+                        app.meshState.onWifiPeerConnected(fromPeer, transport)
+                    }
+                    engine.onPacketReceived(packet, fromPeer, transport)
+                }
+            )
+            transportManager.init(bleTransport)
+            engine.attachTransportManager(transportManager)
+            app.meshEngine = engine
+        }
+        app.meshEngine?.start()
+        app.meshState.onStatusChanged("Mesh active · scanning…")
 
         return START_STICKY // Restart if killed by OS
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        app.meshEngine?.stop()
         app.bleManager?.stop()
         app.meshState.reset()
         app.bleManager = null
+        app.meshEngine = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

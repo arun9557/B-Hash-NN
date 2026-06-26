@@ -100,13 +100,22 @@ class BnnViewModel(application: Application) : AndroidViewModel(application) {
     // ── BLE/Mesh Control ────────────────────────────────────────────────────
 
     fun startBle() {
+        // Ensure MeshEngine is initialized before starting
+        val ctx = app.applicationContext
+        if (app.meshEngine == null) {
+            initMeshEngine(ctx)
+        }
+
         if (BnnSettings.runInBackground.value) {
-            app.applicationContext.startForegroundService(
-                BnnForegroundService.startIntent(app.applicationContext)
+            ctx.startForegroundService(
+                BnnForegroundService.startIntent(ctx)
             )
         } else {
-            app.meshEngine?.start() ?: run {
-                // Fallback: start raw BLE if engine not ready
+            val engine = app.meshEngine
+            if (engine != null) {
+                engine.start()
+            } else {
+                // Absolute fallback: start raw BLE if engine creation failed
                 app.bleManager?.start()
                 mesh.onStatusChanged("Advertising…")
             }

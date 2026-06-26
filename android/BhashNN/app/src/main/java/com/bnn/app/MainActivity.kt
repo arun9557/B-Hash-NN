@@ -27,8 +27,10 @@ import com.bnn.app.ui.theme.BnnTheme
 class MainActivity : ComponentActivity() {
 
     private val viewModel: BnnViewModel by viewModels()
+    private var promptedBt = false
+    private var promptedWifi = false
 
-    // ── Required BLE permissions ──────────────────────────────────────────────
+    // ── Required BLE and WiFi permissions ──────────────────────────────────────
     private val requiredPermissions: Array<String>
         get() {
             val permissions = mutableListOf<String>()
@@ -44,6 +46,7 @@ class MainActivity : ComponentActivity() {
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+                permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
             }
             return permissions.toTypedArray()
         }
@@ -51,20 +54,22 @@ class MainActivity : ComponentActivity() {
     // ── Permission launcher ───────────────────────────────────────────────────
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (results.values.all { it }) {
-            viewModel.startBle()
-        }
-        // If denied, user can tap Start later — handled via BLE button in header
+    ) { _ ->
+        checkPermissionsAndStart()
     }
 
     // ── Bluetooth enable launcher ─────────────────────────────────────────────
     private val enableBtLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            viewModel.startBle()
-        }
+    ) { _ ->
+        checkPermissionsAndStart()
+    }
+
+    // ── WiFi enable launcher ──────────────────────────────────────────────────
+    private val enableWifiLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        checkPermissionsAndStart()
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -80,12 +85,15 @@ class MainActivity : ComponentActivity() {
         setContent {
             val darkTheme = isSystemInDarkTheme()
             BnnTheme(darkTheme = darkTheme) {
-                BnnChatScreen(viewModel = viewModel)
+                BnnChatScreen(
+                    viewModel = viewModel,
+                    onStartMesh = { startMeshFlow() }
+                )
             }
         }
 
-        // Auto-start BLE (will ask for permissions / BT enable as needed)
-        checkPermissionsAndStart()
+        // Auto-start mesh (will ask for permissions / BT and WiFi enable as needed)
+        startMeshFlow()
     }
 
     override fun onDestroy() {
@@ -94,13 +102,19 @@ class MainActivity : ComponentActivity() {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    //  BLE STARTUP FLOW
+    //  MESH STARTUP FLOW
     // ══════════════════════════════════════════════════════════════════════════
+
+    fun startMeshFlow() {
+        promptedBt = false
+        promptedWifi = false
+        checkPermissionsAndStart()
+    }
 
     /**
      * Called from:
-     * - onCreate (auto-start)
-     * - BLE Start button in the header → viewModel.startBle() is called after permission grant
+     * - onCreate (auto-start) via startMeshFlow
+     * - Start button in the header via startMeshFlow
      */
     fun checkPermissionsAndStart() {
         val missing = requiredPermissions.filter {
@@ -110,12 +124,36 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(missing.toTypedArray())
             return
         }
+
+        // 1. Check and prompt Bluetooth
         val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        if (!btManager.adapter.isEnabled) {
+        val btAdapter = btManager.adapter
+        if (btAdapter != null && !btAdapter.isEnabled && !promptedBt) {
+            promptedBt = true
             @Suppress("DEPRECATION")
             enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             return
         }
+
+        // 2. Check and prompt WiFi
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        if (!wifiManager.isWifiEnabled && !promptedWifi) {
+            promptedWifi = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                enableWifiLauncher.launch(Intent(android.provider.Settings.Panel.ACTION_WIFI))
+            } else {
+                @Suppress("DEPRECATION")
+                try {
+                    wifiManager.isWifiEnabled = true
+                    viewModel.startBle()
+                } catch (e: Exception) {
+                    val intent = Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
+                    enableWifiLauncher.launch(intent)
+                }
+            }
+            return
+        }
+
         viewModel.startBle()
     }
 }

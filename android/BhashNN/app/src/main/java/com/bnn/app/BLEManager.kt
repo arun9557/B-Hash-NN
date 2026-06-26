@@ -581,11 +581,13 @@ class BLEManager(
             .build()
 
         val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(BNN_SERVICE_UUID))  // Only UUID in main advertisement
+            .addServiceUuid(ParcelUuid(BNN_SERVICE_UUID))
+            .setIncludeDeviceName(false)   // name goes in scan response to fit in 31 bytes
             .build()
 
+        // Scan response carries the device name — separate 31-byte packet
         val scanResponse = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)                    // Device name in scan response
+            .setIncludeDeviceName(true)
             .build()
 
         advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
@@ -635,6 +637,14 @@ class BLEManager(
                 BluetoothProfile.STATE_CONNECTED -> {
                     val name = device.name ?: device.address
                     Log.i(TAG, "Device connected to GATT server: $name (${device.address})")
+                    
+                    // Retain the connection on Android side to prevent immediate drops
+                    try {
+                        gattServer?.connect(device, false)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error retaining GATT server connection: ${e.message}")
+                    }
+
                     // Restart advertising after a small delay to make sure we stay discoverable
                     mainHandler.postDelayed({
                         if (isAdvertising) {

@@ -716,7 +716,7 @@ def _is_bnn_device(device: BLEDevice) -> bool:
 
     # Normalize labels like "B#NN_DEVICE" -> "BNNDEVICE".
     normalized = "".join(ch for ch in name if ch.isalnum())
-    if "BNN" in normalized:
+    if "BNN" in normalized or "PHONE" in normalized:
         return True
 
     # Fallback: some stacks expose UUIDs in advertisement metadata only.

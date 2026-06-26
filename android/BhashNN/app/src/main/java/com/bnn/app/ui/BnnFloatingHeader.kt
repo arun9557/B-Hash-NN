@@ -40,7 +40,8 @@ fun BnnFloatingHeader(
     viewModel: BnnViewModel,
     colorScheme: ColorScheme,
     onPeerCounterClick: () -> Unit,
-    onTitleClick: () -> Unit
+    onTitleClick: () -> Unit,
+    onStartMesh: () -> Unit
 ) {
     val isConnected by viewModel.isConnected.collectAsStateWithLifecycle()
     val bleStatus by viewModel.bleStatus.collectAsStateWithLifecycle()
@@ -125,7 +126,7 @@ fun BnnFloatingHeader(
                         BleToggleButton(
                             running = bleRunning,
                             onToggle = {
-                                if (bleRunning) viewModel.stopBle() else viewModel.startBle()
+                                if (bleRunning) viewModel.stopBle() else onStartMesh()
                             }
                         )
                     }

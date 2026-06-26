@@ -89,7 +89,7 @@ class MeshEngine(
                     relayToMesh(packet, fromPeerId)
                 }
 
-                packet.dst.startsWith(MY_PEER_PREFIX) -> {
+                packet.dst.startsWith("Phone_") || packet.dst.startsWith("BNN_Phone_") || packet.dst.startsWith("BNN_") -> {
                     // Peer-to-peer: route to specific peer
                     forwardToPeer(packet, fromPeerId)
                 }

@@ -62,7 +62,7 @@ object BnnDeviceIdentifier {
         val prefs = context.getSharedPreferences("bnn_prefs", Context.MODE_PRIVATE)
         var id = prefs.getString("device_id", null)
         if (id == null) {
-            id = "Phone_" + java.util.UUID.randomUUID().toString().substring(0, 6).uppercase()
+            id = "BNN_" + java.util.UUID.randomUUID().toString().substring(0, 6).uppercase()
             prefs.edit().putString("device_id", id).apply()
         }
         cachedId = id

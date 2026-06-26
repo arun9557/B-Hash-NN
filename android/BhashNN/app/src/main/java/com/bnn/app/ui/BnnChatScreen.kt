@@ -27,7 +27,10 @@ import com.bnn.app.ui.theme.NeonGreen
  *   - Peer list bottom sheet (triggered via header peer counter)
  */
 @Composable
-fun BnnChatScreen(viewModel: BnnViewModel) {
+fun BnnChatScreen(
+    viewModel: BnnViewModel,
+    onStartMesh: () -> Unit
+) {
     val colorScheme = MaterialTheme.colorScheme
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
@@ -96,7 +99,8 @@ fun BnnChatScreen(viewModel: BnnViewModel) {
             viewModel = viewModel,
             colorScheme = colorScheme,
             onPeerCounterClick = { viewModel.showPeerSheet() },
-            onTitleClick = { viewModel.showAboutSheet() }
+            onTitleClick = { viewModel.showAboutSheet() },
+            onStartMesh = onStartMesh
         )
 
         // ── Divider under header ────────────────────────────────────────

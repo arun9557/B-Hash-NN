@@ -93,7 +93,7 @@ fun BnnAboutSheet(
 
             // ── Subtitle ──────────────────────────────────────────────────
             Text(
-                text = "decentralized AI mesh with Bluetooth LE",
+                text = "decentralized AI mesh · BLE + WiFi hybrid",
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontFamily = FontFamily.Monospace
                 ),
@@ -117,8 +117,8 @@ fun BnnAboutSheet(
                 Column {
                     FeatureRow(
                         icon = Icons.Filled.Bluetooth,
-                        title = "Offline Mesh Chat",
-                        description = "Communicate directly via Bluetooth LE without internet. Messages relay through nearby devices to extend range.",
+                        title = "Hybrid Mesh Network",
+                        description = "Communicate via BLE + WiFi (LAN, Direct, Aware). Messages relay across all transports to maximize range and speed.",
                         colorScheme = colorScheme
                     )
                     SettingsDivider()
@@ -181,7 +181,7 @@ fun BnnAboutSheet(
 
             // ── Version footer ────────────────────────────────────────────
             Text(
-                text = "B#NN v1.0 · B Hash Neural Network",
+                text = "B#NN v2.0 · Hybrid BLE+WiFi Mesh",
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontFamily = FontFamily.Monospace
                 ),

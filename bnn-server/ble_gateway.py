@@ -33,7 +33,7 @@ from enum import Enum, auto
 from typing import Dict, Optional
 
 import requests
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient, BleakScanner, AdvertisementData
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
@@ -172,6 +172,7 @@ class BNNGateway:
         self._lock = asyncio.Lock()      # protects _sessions across concurrent tasks
         self._connection_tasks: Dict[str, asyncio.Task] = {}  # one manager task per MAC
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # stored at startup
+        self._wrong_devices = set()      # MAC addresses verified to NOT have B#NN service
 
     # ──────────────────────────────────────────────────────────────
     #  ENTRY POINT
@@ -206,27 +207,60 @@ class BNNGateway:
             await asyncio.sleep(SCAN_INTERVAL_SEC)
 
     async def _do_scan(self):
-        discovered = await BleakScanner.discover(
-            timeout=SCAN_DURATION_SEC
-        )
-        for device in discovered:
-            # Keep gateway connection logic focused on B#NN peripherals only.
-            if not _is_bnn_device(device):
-                continue
+        found_devices = {}  # address -> (device, name)
 
+        def callback(device: BLEDevice, adv: AdvertisementData):
+            address = device.address.upper()
+            if address in self._wrong_devices:
+                return
+
+            name = adv.local_name or device.name or ""
+            name_upper = name.upper()
+
+            # Skip known non-B#NN keywords to prevent useless connection attempts
+            skip_keywords = ["JODU", "BUDS", "BUD", "TV", "WATCH", "BAND", "SPEAKER", "HEADPHONE", "AIRDOPES", "ECHO", "PC", "DESKTOP", "LAPTOP"]
+            if any(kw in name_upper for kw in skip_keywords):
+                self._wrong_devices.add(address)
+                return
+
+            normalized = "".join(ch for ch in name_upper if ch.isalnum())
+            is_bnn = "BNN" in normalized or "PHONE" in normalized
+            
+            # Log all advertisements with real-time BLE details
+            log.info(f"Adv: name={name} [{device.address}] (UUIDs: {[str(u) for u in adv.service_uuids]})")
+
+            if not is_bnn:
+                is_bnn = any(str(u).lower() == BNN_SERVICE_UUID.lower() for u in adv.service_uuids)
+
+            # Fallback: if name is empty, treat as potential B#NN device to bypass Windows BLE cache issues
+            if not is_bnn and name == "":
+                is_bnn = True
+                log.info(f"Adv: Empty name device [{device.address}] - checking as potential B#NN device.")
+
+            if is_bnn:
+                found_devices[device.address] = (device, name)
+
+        try:
+            async with BleakScanner(detection_callback=callback):
+                await asyncio.sleep(SCAN_DURATION_SEC)
+        except Exception as e:
+            log.error(f"Error during BLE scanning: {e}")
+            return
+
+        for address, (device, name) in found_devices.items():
             async with self._lock:
-                session = self._sessions.get(device.address)
+                session = self._sessions.get(address)
 
             # Ensure exactly one long-lived connection manager task per device.
-            task = self._connection_tasks.get(device.address)
+            task = self._connection_tasks.get(address)
             task_running = task is not None and not task.done()
 
             if not task_running:
-                log.info(f"Found: {device.name} [{device.address}]")
+                log.info(f"Found potential B#NN device: {name} [{address}]")
                 task = asyncio.create_task(
-                    self._connect_with_retry(device.address, device.name or device.address)
+                    self._connect_with_retry(address, name or address)
                 )
-                self._connection_tasks[device.address] = task
+                self._connection_tasks[address] = task
 
     # ──────────────────────────────────────────────────────────────
     #  TASK 2: HEARTBEAT LOOP
@@ -306,6 +340,8 @@ class BNNGateway:
             session.reconnect_count = attempt
 
             connected_ok = await self._connect_once(session)
+            if mac.upper() in self._wrong_devices:
+                break
 
             if connected_ok:
                 # Device was working but then disconnected — reset counter and retry
@@ -360,7 +396,9 @@ class BNNGateway:
             # Verify B#NN service is present on this peripheral
             service_uuids = [str(s.uuid).lower() for s in client.services]
             if BNN_SERVICE_UUID.lower() not in service_uuids:
-                log.warning(f"[{name}] B#NN GATT service not found — wrong device?")
+                log.warning(f"[{name}] B#NN GATT service not found — wrong device. Blacklisting.")
+                self._wrong_devices.add(mac.upper())
+                session.state = DeviceState.DEAD
                 await client.disconnect()
                 return False
 

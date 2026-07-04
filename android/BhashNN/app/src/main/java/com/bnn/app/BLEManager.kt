@@ -93,6 +93,11 @@ class BLEManager(
     private val seenMessageIds = LinkedHashSet<String>()             // mesh dedup
     private var relayScanRunnable: Runnable? = null
 
+    // ── Callbacks for TransportManager integration ──
+    var onPacketReceived: ((JSONObject, String) -> Unit)? = null
+    var onPeerConnected: ((String) -> Unit)? = null
+    var onPeerDisconnected: ((String) -> Unit)? = null
+
     val isConnected: Boolean
         get() = connectedDevice != null
 
@@ -288,6 +293,7 @@ class BLEManager(
             }
             val name = gatt.device.name ?: address
             mainHandler.post { callback.onRelayPeerDisconnected(name) }
+            onPeerDisconnected?.invoke(name)
         }
     }
 
@@ -304,6 +310,7 @@ class BLEManager(
                     relayPeers[address] = gatt
                     gatt.discoverServices()
                     mainHandler.post { callback.onRelayPeerConnected(name) }
+                    onPeerConnected?.invoke(name)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.i(TAG, "Relay peer disconnected: $name ($address)")
@@ -315,6 +322,7 @@ class BLEManager(
                         Log.w(TAG, "Error closing relay gatt: ${e.message}")
                     }
                     mainHandler.post { callback.onRelayPeerDisconnected(name) }
+                    onPeerDisconnected?.invoke(name)
                 }
             }
         }
@@ -663,6 +671,7 @@ class BLEManager(
                             stopHeartbeat()
                             callback.onDisconnected()
                         }
+                        onPeerDisconnected?.invoke(address)
                     }
                     // Restart advertising to make sure we are visible
                     mainHandler.postDelayed({
@@ -763,7 +772,16 @@ class BLEManager(
                 Log.i(TAG, "Identified gateway server: $name (${device.address})")
                 callback.onConnected(name)
                 startHeartbeat()
+                onPeerConnected?.invoke(device.address)
             }
+        }
+
+        // If hybrid mesh is active, route through it and skip legacy routing
+        val meshCb = onPacketReceived
+        if (meshCb != null) {
+            val fromPeerId = if (src == "server") device.address else src
+            meshCb(msg, fromPeerId)
+            return
         }
 
         when (type) {

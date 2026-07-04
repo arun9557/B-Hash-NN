@@ -558,7 +558,7 @@ class BNNGateway:
             log.error(f"[{session.name}] Unexpected: {e}")
 
         # Send response back to the requesting device
-        response = _make_msg("response", ai_reply, dst=session.mac)
+        response = _make_msg("response", ai_reply, dst=msg.get("src", session.mac))
         await self._send(session, response)
 
         # Mesh relay: broadcast the AI response to all other connected devices

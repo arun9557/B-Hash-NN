@@ -3,6 +3,7 @@ package com.bnn.app
 import com.bnn.app.mesh.MeshPacket
 import com.bnn.app.transport.ITransport
 import com.bnn.app.transport.TransportType
+import org.json.JSONObject
 
 /**
  * BLETransportAdapter — wraps existing BLEManager to implement ITransport.
@@ -11,6 +12,21 @@ import com.bnn.app.transport.TransportType
 class BLETransportAdapter(
     private val bleManager: BLEManager
 ) : ITransport {
+
+    init {
+        bleManager.onPacketReceived = { json, fromPeerId ->
+            val packet = MeshPacket.fromJson(json, TransportType.BLE)
+            if (packet != null) {
+                onPacketReceived?.invoke(packet, fromPeerId, TransportType.BLE)
+            }
+        }
+        bleManager.onPeerConnected = { peerId ->
+            onPeerConnected?.invoke(peerId, TransportType.BLE)
+        }
+        bleManager.onPeerDisconnected = { peerId ->
+            onPeerDisconnected?.invoke(peerId, TransportType.BLE)
+        }
+    }
 
     override val type: TransportType = TransportType.BLE
     override val isAvailable: Boolean get() = true

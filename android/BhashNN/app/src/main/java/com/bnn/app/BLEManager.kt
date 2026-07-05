@@ -589,13 +589,13 @@ class BLEManager(
             .build()
 
         val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(BNN_SERVICE_UUID))
-            .setIncludeDeviceName(false)   // name goes in scan response to fit in 31 bytes
+            .setIncludeDeviceName(true)   // name in primary packet to guarantee Windows discovery
             .build()
 
-        // Scan response carries the device name — separate 31-byte packet
+        // Scan response carries the service UUID
         val scanResponse = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+            .addServiceUuid(ParcelUuid(BNN_SERVICE_UUID))
+            .setIncludeDeviceName(false)
             .build()
 
         advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
